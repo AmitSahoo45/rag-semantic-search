@@ -1,0 +1,6 @@
+@SemanticRagSearch.Api_HostAddress = http://localhost:5205
+
+GET {{SemanticRagSearch.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

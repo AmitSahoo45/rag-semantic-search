@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SemanticRagSearch.Api/SemanticRagSearch.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SemanticRagSearch.IntegrationTests/SemanticRagSearch.IntegrationTests.csproj" />
+    <Project Path="tests/SemanticRagSearch.UnitTests/SemanticRagSearch.UnitTests.csproj" />
+  </Folder>
+</Solution>
