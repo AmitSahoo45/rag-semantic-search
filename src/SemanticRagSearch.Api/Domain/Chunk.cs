@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using Pgvector;
 
 namespace SemanticRagSearch.Api.Domain;
 
@@ -27,7 +28,7 @@ public class Chunk
         }
     }
 
-    public float[] Embedding { get; set; } = [];
+    public Vector Embedding { get; set; } = new Vector(Array.Empty<float>());
 
     public ChunkMetaData? MetaData { get; set; }
 
