@@ -1,4 +1,5 @@
 using SemanticRagSearch.Api.Configuration;
+using SemanticRagSearch.Api.Chunking;
 using SemanticRagSearch.Api.Data;
 using SemanticRagSearch.Api.Embedding;
 using Microsoft.EntityFrameworkCore;
@@ -20,6 +21,7 @@ builder.Services.AddHttpClient("Ollama", client =>
     client.BaseAddress = new Uri(OllamaConfig.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(120);
 });
+builder.Services.AddScoped<IChunkingService, ChunkingService>();
 builder.Services.AddScoped<IEmbeddingService, OllamaEmbeddingService>();
 
 builder.Services.AddHealthChecks().AddNpgSql(builder.Configuration.GetConnectionString("DefaultConnection")!);
