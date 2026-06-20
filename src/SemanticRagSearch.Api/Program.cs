@@ -1,5 +1,6 @@
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Data;
+using SemanticRagSearch.Api.Embedding;
 using Microsoft.EntityFrameworkCore;
 using Pgvector.EntityFrameworkCore;
 
@@ -19,6 +20,7 @@ builder.Services.AddHttpClient("Ollama", client =>
     client.BaseAddress = new Uri(OllamaConfig.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(120);
 });
+builder.Services.AddScoped<IEmbeddingService, OllamaEmbeddingService>();
 
 builder.Services.AddHealthChecks().AddNpgSql(builder.Configuration.GetConnectionString("DefaultConnection")!);
 builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"), npgsqlOptions => npgsqlOptions.UseVector()));
@@ -27,5 +29,6 @@ var app = builder.Build();
 
 app.MapControllers();
 app.MapHealthChecks("/health");
+app.MapGet("/", () => "Semantic RAG Search API is running");
 
 app.Run();
