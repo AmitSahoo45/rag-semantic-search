@@ -25,7 +25,8 @@ public class SearchSettings
 {
     public const string SectionName = "App:Search";
 
-    public double minSimilarity { get; set; } = 0.3;
-    public double defaultTopK { get; set; } = 5;
+    public double MinSimilarity { get; set; } = 0.3;
+    public int DefaultTopK { get; set; } = 5;
+    public int MaxTopK { get; set; } = 20;
 }
 

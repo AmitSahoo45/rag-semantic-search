@@ -2,7 +2,12 @@ using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Chunking;
 using SemanticRagSearch.Api.Data;
 using SemanticRagSearch.Api.Embedding;
+using SemanticRagSearch.Api.Ingestion;
+using SemanticRagSearch.Api.Search;
+using SemanticRagSearch.Api.VectorStore;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using Pgvector;
 using Pgvector.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,8 +26,17 @@ builder.Services.AddHttpClient("Ollama", client =>
     client.BaseAddress = new Uri(OllamaConfig.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(120);
 });
+builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
+{
+    var dataSourceBuilder = new NpgsqlDataSourceBuilder(builder.Configuration.GetConnectionString("DefaultConnection"));
+    dataSourceBuilder.UseVector();
+    return dataSourceBuilder.Build();
+});
 builder.Services.AddScoped<IChunkingService, ChunkingService>();
 builder.Services.AddScoped<IEmbeddingService, OllamaEmbeddingService>();
+builder.Services.AddScoped<IVectorStoreService, PgVectorStoreService>();
+builder.Services.AddScoped<IDocumentIngestionService, DocumentIngestionService>();
+builder.Services.AddScoped<ISemanticSearchService, SemanticSearchService>();
 
 builder.Services.AddHealthChecks().AddNpgSql(builder.Configuration.GetConnectionString("DefaultConnection")!);
 builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"), npgsqlOptions => npgsqlOptions.UseVector()));
