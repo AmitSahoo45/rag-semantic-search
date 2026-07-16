@@ -30,3 +30,11 @@ public class SearchSettings
     public int MaxTopK { get; set; } = 20;
 }
 
+public class RagSettings
+{
+    public const string SectionName = "App:Rag";
+
+    public int MaxQuestionLength { get; set; } = 2_000;
+    public int MaxContextCharacters { get; set; } = 12_000;
+}
+

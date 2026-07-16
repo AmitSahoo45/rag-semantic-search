@@ -33,3 +33,15 @@ Content-Type: application/json
 }
 
 ###
+
+POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/ask
+Content-Type: application/json
+
+{
+  "tenantId": "PUT-TENANT-ID-HERE",
+  "question": "How does semantic search retrieve relevant document chunks?",
+  "topK": 5,
+  "minSimilarity": 0.3
+}
+
+###
