@@ -6,4 +6,9 @@ public interface ITextGenerationService
         string systemPrompt,
         string userPrompt,
         CancellationToken cancellationToken = default);
+
+    IAsyncEnumerable<string> GenerateStreamAsync(
+        string systemPrompt,
+        string userPrompt,
+        CancellationToken cancellationToken = default);
 }
