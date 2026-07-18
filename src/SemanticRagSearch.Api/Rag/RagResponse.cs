@@ -6,4 +6,5 @@ public sealed record RagResponse(
     int TopK,
     double MinSimilarity,
     string Answer,
-    IReadOnlyList<RagSource> Sources);
+    IReadOnlyList<RagSource> Sources,
+    RagExecutionMetadata Metadata);

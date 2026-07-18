@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.Options;
 using SemanticRagSearch.Api.Configuration;
@@ -33,10 +35,112 @@ public class RagService : IRagService
         RagRequest request,
         CancellationToken cancellationToken = default)
     {
+        RagPreparation preparation = await PrepareAsync(request, cancellationToken);
+
+        if (preparation.Sources.Count == 0)
+        {
+            return new RagResponse(
+                preparation.TenantId,
+                preparation.Question,
+                preparation.TopK,
+                preparation.MinSimilarity,
+                NoAnswerMessage,
+                preparation.Sources,
+                new RagExecutionMetadata(preparation.SearchLatencyMs, 0, null));
+        }
+
+        string systemPrompt = BuildSystemPrompt();
+        string userPrompt = BuildUserPrompt(preparation.Question, preparation.Sources);
+        Stopwatch generationTimer = Stopwatch.StartNew();
+
+        string answer = await _textGenerationService.GenerateAsync(
+            systemPrompt,
+            userPrompt,
+            cancellationToken);
+        generationTimer.Stop();
+
+        _logger.LogInformation(
+            "Generated RAG answer for tenant {TenantId} using {SourceCount} source chunk(s).",
+            preparation.TenantId,
+            preparation.Sources.Count);
+
+        return new RagResponse(
+            preparation.TenantId,
+            preparation.Question,
+            preparation.TopK,
+            preparation.MinSimilarity,
+            answer,
+            preparation.Sources,
+            new RagExecutionMetadata(
+                preparation.SearchLatencyMs,
+                generationTimer.ElapsedMilliseconds,
+                null));
+    }
+
+    public async IAsyncEnumerable<RagStreamEvent> AskStreamAsync(
+        RagRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        RagPreparation preparation = await PrepareAsync(request, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (preparation.Sources.Count == 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new RagStreamEvent(NoAnswerMessage, false, null, null);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new RagStreamEvent(
+                null,
+                true,
+                preparation.Sources,
+                new RagExecutionMetadata(preparation.SearchLatencyMs, 0, null));
+            yield break;
+        }
+
+        string systemPrompt = BuildSystemPrompt();
+        string userPrompt = BuildUserPrompt(preparation.Question, preparation.Sources);
+        Stopwatch generationTimer = Stopwatch.StartNew();
+        long? timeToFirstTextMs = null;
+
+        await foreach (string fragment in _textGenerationService
+            .GenerateStreamAsync(systemPrompt, userPrompt, cancellationToken)
+            .WithCancellation(cancellationToken))
+        {
+            if (fragment.Length == 0)
+                continue;
+
+            cancellationToken.ThrowIfCancellationRequested();
+            timeToFirstTextMs ??= generationTimer.ElapsedMilliseconds;
+            yield return new RagStreamEvent(fragment, false, null, null);
+        }
+
+        generationTimer.Stop();
+
+        _logger.LogInformation(
+            "Generated streaming RAG answer for tenant {TenantId} using {SourceCount} source chunk(s).",
+            preparation.TenantId,
+            preparation.Sources.Count);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return new RagStreamEvent(
+            null,
+            true,
+            preparation.Sources,
+            new RagExecutionMetadata(
+                preparation.SearchLatencyMs,
+                generationTimer.ElapsedMilliseconds,
+                timeToFirstTextMs));
+    }
+
+    private async Task<RagPreparation> PrepareAsync(
+        RagRequest request,
+        CancellationToken cancellationToken)
+    {
         ValidateRequest(request);
 
         string normalizedQuestion = request.Question.Trim();
-
+        Stopwatch searchTimer = Stopwatch.StartNew();
         SemanticSearchResponse searchResponse = await _semanticSearchService.SearchAsync(
             new SemanticSearchRequest(
                 request.TenantId,
@@ -44,40 +148,15 @@ public class RagService : IRagService
                 request.TopK,
                 request.MinSimilarity),
             cancellationToken);
+        searchTimer.Stop();
 
-        IReadOnlyList<RagSource> sources = BuildSources(searchResponse.Matches);
-
-        if (sources.Count == 0)
-        {
-            return new RagResponse(
-                request.TenantId,
-                normalizedQuestion,
-                searchResponse.TopK,
-                searchResponse.MinSimilarity,
-                NoAnswerMessage,
-                sources);
-        }
-
-        string systemPrompt = BuildSystemPrompt();
-        string userPrompt = BuildUserPrompt(normalizedQuestion, sources);
-
-        string answer = await _textGenerationService.GenerateAsync(
-            systemPrompt,
-            userPrompt,
-            cancellationToken);
-
-        _logger.LogInformation(
-            "Generated RAG answer for tenant {TenantId} using {SourceCount} source chunk(s).",
-            request.TenantId,
-            sources.Count);
-
-        return new RagResponse(
+        return new RagPreparation(
             request.TenantId,
             normalizedQuestion,
             searchResponse.TopK,
             searchResponse.MinSimilarity,
-            answer,
-            sources);
+            BuildSources(searchResponse.Matches),
+            searchTimer.ElapsedMilliseconds);
     }
 
     private IReadOnlyList<RagSource> BuildSources(IReadOnlyList<SemanticSearchMatch> matches)
@@ -177,4 +256,12 @@ public class RagService : IRagService
         if (settings.MaxContextCharacters <= 0)
             throw new InvalidOperationException("MaxContextCharacters must be greater than zero.");
     }
+
+    private sealed record RagPreparation(
+        Guid TenantId,
+        string Question,
+        int TopK,
+        double MinSimilarity,
+        IReadOnlyList<RagSource> Sources,
+        long SearchLatencyMs);
 }
