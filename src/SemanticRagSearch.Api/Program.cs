@@ -41,6 +41,8 @@ builder.Services.AddScoped<IVectorStoreService, PgVectorStoreService>();
 builder.Services.AddScoped<IDocumentIngestionService, DocumentIngestionService>();
 builder.Services.AddScoped<ISemanticSearchService, SemanticSearchService>();
 builder.Services.AddScoped<ITextGenerationService, OllamaTextGenerationService>();
+builder.Services.AddScoped<ITextTokenEstimator, ApproximateTextTokenEstimator>();
+builder.Services.AddScoped<IContextAssembler, ContextAssembler>();
 builder.Services.AddScoped<IRagService, RagService>();
 
 builder.Services.AddHealthChecks().AddNpgSql(builder.Configuration.GetConnectionString("DefaultConnection")!);

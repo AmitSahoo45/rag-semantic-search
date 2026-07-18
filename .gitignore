@@ -21,3 +21,5 @@ docker/redis_data/
 *.log
 plan/
 notes/
+docs/
+artifacts/

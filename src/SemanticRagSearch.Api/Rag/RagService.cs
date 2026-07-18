@@ -14,17 +14,23 @@ public class RagService : IRagService
 
     private readonly ISemanticSearchService _semanticSearchService;
     private readonly ITextGenerationService _textGenerationService;
+    private readonly IContextAssembler _contextAssembler;
+    private readonly ITextTokenEstimator _tokenEstimator;
     private readonly RagSettings _settings;
     private readonly ILogger<RagService> _logger;
 
     public RagService(
         ISemanticSearchService semanticSearchService,
         ITextGenerationService textGenerationService,
+        IContextAssembler contextAssembler,
+        ITextTokenEstimator tokenEstimator,
         IOptions<RagSettings> settings,
         ILogger<RagService> logger)
     {
         _semanticSearchService = semanticSearchService ?? throw new ArgumentNullException(nameof(semanticSearchService));
         _textGenerationService = textGenerationService ?? throw new ArgumentNullException(nameof(textGenerationService));
+        _contextAssembler = contextAssembler ?? throw new ArgumentNullException(nameof(contextAssembler));
+        _tokenEstimator = tokenEstimator ?? throw new ArgumentNullException(nameof(tokenEstimator));
         _settings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
@@ -50,7 +56,7 @@ public class RagService : IRagService
         }
 
         string systemPrompt = BuildSystemPrompt();
-        string userPrompt = BuildUserPrompt(preparation.Question, preparation.Sources);
+        string userPrompt = BuildUserPrompt(preparation.Question, preparation.Context);
         Stopwatch generationTimer = Stopwatch.StartNew();
 
         string answer = await _textGenerationService.GenerateAsync(
@@ -99,7 +105,7 @@ public class RagService : IRagService
         }
 
         string systemPrompt = BuildSystemPrompt();
-        string userPrompt = BuildUserPrompt(preparation.Question, preparation.Sources);
+        string userPrompt = BuildUserPrompt(preparation.Question, preparation.Context);
         Stopwatch generationTimer = Stopwatch.StartNew();
         long? timeToFirstTextMs = null;
 
@@ -150,50 +156,27 @@ public class RagService : IRagService
             cancellationToken);
         searchTimer.Stop();
 
+        string systemPrompt = BuildSystemPrompt();
+        int fixedPromptTokens =
+            _tokenEstimator.EstimateTokens(systemPrompt) +
+            _tokenEstimator.EstimateTokens(BuildUserPrompt(normalizedQuestion, ""));
+        int contextTokenBudget = Math.Max(
+            0,
+            _settings.MaxModelContextTokens -
+            _settings.ReservedResponseTokens -
+            fixedPromptTokens);
+        ContextAssemblyResult assembly = _contextAssembler.Assemble(
+            searchResponse.Matches,
+            contextTokenBudget);
+
         return new RagPreparation(
             request.TenantId,
             normalizedQuestion,
             searchResponse.TopK,
             searchResponse.MinSimilarity,
-            BuildSources(searchResponse.Matches),
+            assembly.Context,
+            assembly.Sources,
             searchTimer.ElapsedMilliseconds);
-    }
-
-    private IReadOnlyList<RagSource> BuildSources(IReadOnlyList<SemanticSearchMatch> matches)
-    {
-        var sources = new List<RagSource>();
-        int usedCharacters = 0;
-
-        for (int i = 0; i < matches.Count; i++)
-        {
-            SemanticSearchMatch match = matches[i];
-            int remainingCharacters = _settings.MaxContextCharacters - usedCharacters;
-
-            if (remainingCharacters <= 0)
-                break;
-
-            string textContent = match.TextContent.Trim();
-
-            if (textContent.Length > remainingCharacters)
-                textContent = textContent[..remainingCharacters];
-
-            if (string.IsNullOrWhiteSpace(textContent))
-                continue;
-
-            sources.Add(new RagSource(
-                sources.Count + 1,
-                match.ChunkId,
-                match.DocumentId,
-                match.DocumentTitle,
-                match.SourceUrl,
-                match.ChunkIndex,
-                match.Score,
-                textContent));
-
-            usedCharacters += textContent.Length;
-        }
-
-        return sources;
     }
 
     private static string BuildSystemPrompt()
@@ -208,27 +191,15 @@ public class RagService : IRagService
             """;
     }
 
-    private static string BuildUserPrompt(string question, IReadOnlyList<RagSource> sources)
+    private static string BuildUserPrompt(string question, string context)
     {
         var promptBuilder = new StringBuilder();
         promptBuilder.AppendLine("Question:");
         promptBuilder.AppendLine(question);
         promptBuilder.AppendLine();
         promptBuilder.AppendLine("Context chunks:");
-
-        foreach (RagSource source in sources)
-        {
-            promptBuilder.AppendLine($"[{source.SourceNumber}] Document: {source.DocumentTitle}");
-            promptBuilder.AppendLine($"ChunkIndex: {source.ChunkIndex}");
-            promptBuilder.AppendLine($"Score: {source.Score:0.0000}");
-
-            if (!string.IsNullOrWhiteSpace(source.SourceUrl))
-                promptBuilder.AppendLine($"SourceUrl: {source.SourceUrl}");
-
-            promptBuilder.AppendLine(source.TextContent);
-            promptBuilder.AppendLine();
-        }
-
+        promptBuilder.AppendLine(context);
+        promptBuilder.AppendLine();
         promptBuilder.AppendLine("Answer:");
         return promptBuilder.ToString();
     }
@@ -253,8 +224,17 @@ public class RagService : IRagService
         if (settings.MaxQuestionLength <= 0)
             throw new InvalidOperationException("MaxQuestionLength must be greater than zero.");
 
-        if (settings.MaxContextCharacters <= 0)
-            throw new InvalidOperationException("MaxContextCharacters must be greater than zero.");
+        if (settings.MaxModelContextTokens <= 0)
+            throw new InvalidOperationException("MaxModelContextTokens must be greater than zero.");
+
+        if (settings.ReservedResponseTokens <= 0)
+            throw new InvalidOperationException("ReservedResponseTokens must be greater than zero.");
+
+        if (settings.ReservedResponseTokens >= settings.MaxModelContextTokens)
+        {
+            throw new InvalidOperationException(
+                "ReservedResponseTokens must be less than MaxModelContextTokens.");
+        }
     }
 
     private sealed record RagPreparation(
@@ -262,6 +242,7 @@ public class RagService : IRagService
         string Question,
         int TopK,
         double MinSimilarity,
+        string Context,
         IReadOnlyList<RagSource> Sources,
         long SearchLatencyMs);
 }

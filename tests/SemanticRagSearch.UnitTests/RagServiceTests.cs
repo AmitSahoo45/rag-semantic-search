@@ -12,6 +12,29 @@ public class RagServiceTests
 {
     private static readonly Guid TenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
+    [Theory]
+    [InlineData(0, 1, "MaxModelContextTokens")]
+    [InlineData(128, 0, "ReservedResponseTokens")]
+    [InlineData(128, 128, "ReservedResponseTokens")]
+    [InlineData(128, 129, "ReservedResponseTokens")]
+    public void Constructor_RejectsInvalidTokenWindowConfiguration(
+        int maxModelContextTokens,
+        int reservedResponseTokens,
+        string expectedSetting)
+    {
+        var semanticSearch = new Mock<ISemanticSearchService>();
+        var textGeneration = new Mock<ITextGenerationService>();
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => CreateService(
+                semanticSearch.Object,
+                textGeneration.Object,
+                maxModelContextTokens,
+                reservedResponseTokens));
+
+        Assert.Contains(expectedSetting, exception.Message);
+    }
+
     [Fact]
     public async Task AskStreamAsync_StreamsFragmentsThenEmitsCompletionMetadata()
     {
@@ -161,6 +184,7 @@ public class RagServiceTests
         var semanticSearch = new Mock<ISemanticSearchService>(MockBehavior.Strict);
         var textGeneration = new Mock<ITextGenerationService>(MockBehavior.Strict);
         string? userPrompt = null;
+        string sourceContent = new('x', 2_000);
 
         semanticSearch
             .Setup(service => service.SearchAsync(
@@ -177,7 +201,7 @@ public class RagServiceTests
                     "Grounding document",
                     null,
                     0,
-                    "abcdef",
+                    sourceContent,
                     0.9)]));
 
         textGeneration
@@ -191,15 +215,18 @@ public class RagServiceTests
         RagService service = CreateService(
             semanticSearch.Object,
             textGeneration.Object,
-            maxContextCharacters: 5);
+            maxModelContextTokens: 256,
+            reservedResponseTokens: 64);
 
         List<RagStreamEvent> events = await CollectAsync(
             service.AskStreamAsync(new RagRequest(TenantId, "question", null, null)));
 
         string prompt = Assert.IsType<string>(userPrompt);
-        Assert.Contains("abcde", prompt);
-        Assert.DoesNotContain("abcdef", prompt);
-        Assert.Equal("abcde", Assert.Single(events[1].Sources!).TextContent);
+        RagSource includedSource = Assert.Single(events[1].Sources!);
+        Assert.NotEmpty(includedSource.TextContent);
+        Assert.True(includedSource.TextContent.Length < sourceContent.Length);
+        Assert.Contains(includedSource.TextContent, prompt);
+        Assert.DoesNotContain(sourceContent, prompt);
     }
 
     [Fact]
@@ -207,6 +234,7 @@ public class RagServiceTests
     {
         var semanticSearch = new Mock<ISemanticSearchService>(MockBehavior.Strict);
         var textGeneration = new Mock<ITextGenerationService>(MockBehavior.Strict);
+        string? userPrompt = null;
 
         semanticSearch
             .Setup(service => service.SearchAsync(
@@ -235,6 +263,7 @@ public class RagServiceTests
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((_, prompt, _) => userPrompt = prompt)
             .ReturnsAsync("grounded answer");
 
         RagService service = CreateService(semanticSearch.Object, textGeneration.Object);
@@ -248,6 +277,9 @@ public class RagServiceTests
         Assert.True(response.Metadata.SearchLatencyMs >= 0);
         Assert.True(response.Metadata.GenerationLatencyMs >= 0);
         Assert.Null(response.Metadata.TimeToFirstTextMs);
+        string prompt = Assert.IsType<string>(userPrompt);
+        Assert.Contains("[1] Document: Grounding document", prompt);
+        Assert.Contains("evidence", prompt);
     }
 
     [Fact]
@@ -376,16 +408,27 @@ public class RagServiceTests
     private static RagService CreateService(
         ISemanticSearchService semanticSearch,
         ITextGenerationService textGeneration,
-        int maxContextCharacters = 12_000)
+        int maxModelContextTokens = 4_096,
+        int reservedResponseTokens = 1_024)
     {
+        IOptions<RagSettings> settings = Options.Create(new RagSettings
+        {
+            MaxQuestionLength = 2_000,
+            MaxModelContextTokens = maxModelContextTokens,
+            ReservedResponseTokens = reservedResponseTokens,
+            EstimatedCharactersPerToken = 4.0
+        });
+        var tokenEstimator = new ApproximateTextTokenEstimator(settings);
+        var contextAssembler = new ContextAssembler(
+            tokenEstimator,
+            NullLogger<ContextAssembler>.Instance);
+
         return new RagService(
             semanticSearch,
             textGeneration,
-            Options.Create(new RagSettings
-            {
-                MaxQuestionLength = 2_000,
-                MaxContextCharacters = maxContextCharacters
-            }),
+            contextAssembler,
+            tokenEstimator,
+            settings,
             NullLogger<RagService>.Instance);
     }
 

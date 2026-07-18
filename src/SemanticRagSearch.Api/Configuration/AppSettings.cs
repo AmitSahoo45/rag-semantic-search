@@ -35,6 +35,8 @@ public class RagSettings
     public const string SectionName = "App:Rag";
 
     public int MaxQuestionLength { get; set; } = 2_000;
-    public int MaxContextCharacters { get; set; } = 12_000;
+    public int MaxModelContextTokens { get; set; } = 4_096;
+    public int ReservedResponseTokens { get; set; } = 1_024;
+    public double EstimatedCharactersPerToken { get; set; } = 4.0;
 }
 
