@@ -40,4 +40,22 @@ public class RagController : ControllerBase
             return StatusCode(StatusCodes.Status502BadGateway, new { error = exception.Message });
         }
     }
+
+    [HttpPost("stream")]
+    [Produces("text/event-stream")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public IResult AskStream(
+        [FromBody] RagRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return Results.BadRequest(
+                new { error = "Request body is required." });
+        }
+
+        return TypedResults.ServerSentEvents(
+            _ragService.AskStreamAsync(request, cancellationToken));
+    }
 }

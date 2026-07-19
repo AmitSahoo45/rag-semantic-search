@@ -45,3 +45,16 @@ Content-Type: application/json
 }
 
 ###
+
+POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/ask/stream
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "tenantId": "00000000-0000-0000-0000-000000000001",
+  "question": "How does semantic search retrieve relevant document chunks?",
+  "topK": 5,
+  "minSimilarity": 0.3
+}
+
+###
