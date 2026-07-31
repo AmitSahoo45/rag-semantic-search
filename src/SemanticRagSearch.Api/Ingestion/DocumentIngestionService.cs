@@ -6,7 +6,6 @@ using SemanticRagSearch.Api.Chunking;
 using SemanticRagSearch.Api.Data;
 using SemanticRagSearch.Api.Domain;
 using SemanticRagSearch.Api.Embedding;
-using SemanticRagSearch.Api.VectorStore;
 
 namespace SemanticRagSearch.Api.Ingestion;
 
@@ -18,20 +17,17 @@ public class DocumentIngestionService : IDocumentIngestionService
     private readonly AppDbContext _dbContext;
     private readonly IChunkingService _chunkingService;
     private readonly IEmbeddingService _embeddingService;
-    private readonly IVectorStoreService _vectorStoreService;
     private readonly ILogger<DocumentIngestionService> _logger;
 
     public DocumentIngestionService(
         AppDbContext dbContext,
         IChunkingService chunkingService,
         IEmbeddingService embeddingService,
-        IVectorStoreService vectorStoreService,
         ILogger<DocumentIngestionService> logger)
     {
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
         _chunkingService = chunkingService ?? throw new ArgumentNullException(nameof(chunkingService));
         _embeddingService = embeddingService ?? throw new ArgumentNullException(nameof(embeddingService));
-        _vectorStoreService = vectorStoreService ?? throw new ArgumentNullException(nameof(vectorStoreService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -55,86 +51,75 @@ public class DocumentIngestionService : IDocumentIngestionService
                 d => d.TenantId == request.TenantId && d.ContentHash == contentHash,
                 cancellationToken);
 
+        Document document;
+        bool isNewDocument;
+
         if (existingDocument is not null)
         {
             int existingChunkCount = await _dbContext.Chunks
                 .CountAsync(c => c.DocumentId == existingDocument.DocumentId, cancellationToken);
 
-            _logger.LogInformation(
-                "Skipped duplicate document ingestion for tenant {TenantId}. Existing document: {DocumentId}.",
-                request.TenantId,
-                existingDocument.DocumentId);
-
-            return new DocumentIngestionResult(existingDocument.DocumentId, existingChunkCount, true);
-        }
-
-        var document = new Document
-        {
-            TenantId = request.TenantId,
-            Title = request.Title.Trim(),
-            SourceUrl = NormalizeOptionalValue(request.SourceUrl),
-            ContentHash = contentHash,
-            IngestedAt = DateTime.UtcNow
-        };
-
-        _dbContext.Documents.Add(document);
-        await _dbContext.SaveChangesAsync(cancellationToken);
-
-        try
-        {
-            IReadOnlyList<Chunk> chunks = _chunkingService.ChunkDocument(document, request.Content);
-
-            IReadOnlyList<float[]> embeddings = await _embeddingService.EmbedBatchAsync(
-                chunks.Select(c => c.TextContent).ToArray(),
-                cancellationToken);
-
-            if (embeddings.Count != chunks.Count)
-                throw new InvalidOperationException($"Embedding count {embeddings.Count} does not match chunk count {chunks.Count}.");
-
-            for (int i = 0; i < chunks.Count; i++)
+            if (existingChunkCount > 0)
             {
-                chunks[i].Embedding = new Vector(embeddings[i]);
+                _logger.LogInformation(
+                    "Skipped duplicate document ingestion for tenant {TenantId}. Existing document: {DocumentId}.",
+                    request.TenantId,
+                    existingDocument.DocumentId);
+
+                return new DocumentIngestionResult(existingDocument.DocumentId, existingChunkCount, true);
             }
 
-            await _vectorStoreService.StoreBatchAsync(chunks, cancellationToken);
+            document = existingDocument;
+            isNewDocument = false;
 
-            _logger.LogInformation(
-                "Ingested document {DocumentId} for tenant {TenantId} with {ChunkCount} chunk(s).",
+            _logger.LogWarning(
+                "Retrying incomplete document {DocumentId} for tenant {TenantId} because it has no chunks.",
                 document.DocumentId,
-                document.TenantId,
-                chunks.Count);
-
-            return new DocumentIngestionResult(document.DocumentId, chunks.Count, false);
+                document.TenantId);
         }
-        catch
+        else
         {
-            await CleanupDocumentAsync(document.DocumentId);
-            throw;
+            document = new Document
+            {
+                TenantId = request.TenantId,
+                Title = request.Title.Trim(),
+                SourceUrl = NormalizeOptionalValue(request.SourceUrl),
+                ContentHash = contentHash,
+                IngestedAt = DateTime.UtcNow
+            };
+            isNewDocument = true;
         }
-    }
 
-    private async Task CleanupDocumentAsync(Guid documentId)
-    {
-        try
+        IReadOnlyList<Chunk> chunks = _chunkingService.ChunkDocument(document, request.Content);
+
+        if (chunks.Count == 0)
+            throw new InvalidOperationException("Chunking produced no chunks for the document.");
+
+        IReadOnlyList<float[]> embeddings = await _embeddingService.EmbedBatchAsync(
+            chunks.Select(c => c.TextContent).ToArray(),
+            cancellationToken);
+
+        if (embeddings.Count != chunks.Count)
+            throw new InvalidOperationException($"Embedding count {embeddings.Count} does not match chunk count {chunks.Count}.");
+
+        for (int i = 0; i < chunks.Count; i++)
         {
-            await _vectorStoreService.DeleteByDocumentIdAsync(documentId);
-
-            Document? document = await _dbContext.Documents.FindAsync(documentId);
-            if (document is null)
-                return;
-
-            _dbContext.Documents.Remove(document);
-            await _dbContext.SaveChangesAsync();
-
-            _logger.LogWarning("Cleaned up document {DocumentId} after ingestion failure.", documentId);
+            chunks[i].Embedding = new Vector(embeddings[i]);
         }
-        catch (Exception cleanupException)
-        {
-            _logger.LogError(
-                cleanupException,
-                "Failed to clean up document {DocumentId} after ingestion failure.",
-                documentId);
-        }
+
+        if (isNewDocument)
+            _dbContext.Documents.Add(document);
+
+        _dbContext.Chunks.AddRange(chunks);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "Ingested document {DocumentId} for tenant {TenantId} with {ChunkCount} chunk(s).",
+            document.DocumentId,
+            document.TenantId,
+            chunks.Count);
+
+        return new DocumentIngestionResult(document.DocumentId, chunks.Count, false);
     }
 
     private static void ValidateRequest(DocumentIngestionRequest request)
