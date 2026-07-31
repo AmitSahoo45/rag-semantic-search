@@ -159,6 +159,18 @@ namespace SemanticRagSearch.Api.Migrations
                         .IsUnique();
 
                     b.ToTable("tenants", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            TenantId = new Guid("00000000-0000-0000-0000-000000000001"),
+                            CreatedDate = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Email = "development@semanticragsearch.invalid",
+                            IsActive = true,
+                            LastModifiedDate = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
+                            TenantDescription = "Default tenant for local Phase 1-2 development.",
+                            TenantName = "Development Tenant"
+                        });
                 });
 
             modelBuilder.Entity("SemanticRagSearch.Api.Domain.UsageRecord", b =>

@@ -14,7 +14,7 @@ POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/documents
 Content-Type: application/json
 
 {
-  "tenantId": "PUT-TENANT-ID-HERE",
+  "tenantId": "00000000-0000-0000-0000-000000000001",
   "title": "Sample document",
   "sourceUrl": "local-sample",
   "content": "Semantic search stores document chunks as embeddings. During retrieval, the query is embedded and compared against stored vectors."
@@ -26,7 +26,7 @@ POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/search
 Content-Type: application/json
 
 {
-  "tenantId": "PUT-TENANT-ID-HERE",
+  "tenantId": "00000000-0000-0000-0000-000000000001",
   "query": "How does semantic search retrieve relevant document chunks?",
   "topK": 5,
   "minSimilarity": 0.3
@@ -38,7 +38,7 @@ POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/ask
 Content-Type: application/json
 
 {
-  "tenantId": "PUT-TENANT-ID-HERE",
+  "tenantId": "00000000-0000-0000-0000-000000000001",
   "question": "How does semantic search retrieve relevant document chunks?",
   "topK": 5,
   "minSimilarity": 0.3

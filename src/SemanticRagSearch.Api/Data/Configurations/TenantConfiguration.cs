@@ -48,5 +48,20 @@ public class TenantConfiguration : IEntityTypeConfiguration<Tenant>
         builder.Property(t => t.IsActive)
             .HasColumnName("is_active")
             .IsRequired();
+
+        DateTime developmentTenantTimestamp =
+            new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        builder.HasData(new
+        {
+            TenantId = Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            TenantName = "Development Tenant",
+            TenantDescription = "Default tenant for local Phase 1-2 development.",
+            Email = "development@semanticragsearch.invalid",
+            ApiKey = (string?)null,
+            CreatedDate = developmentTenantTimestamp,
+            LastModifiedDate = developmentTenantTimestamp,
+            IsActive = true
+        });
     }
 }
