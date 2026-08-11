@@ -2,6 +2,7 @@ using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Chunking;
 using SemanticRagSearch.Api.Data;
 using SemanticRagSearch.Api.Embedding;
+using SemanticRagSearch.Api.Errors;
 using SemanticRagSearch.Api.Generation;
 using SemanticRagSearch.Api.Ingestion;
 using SemanticRagSearch.Api.Rag;
@@ -22,6 +23,7 @@ builder.Services.Configure<RagSettings>(builder.Configuration.GetSection(RagSett
 // -----------
 // Add services
 builder.Services.AddControllers();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
 builder.Services.AddHttpClient("Ollama", client =>
 {
@@ -50,8 +52,13 @@ builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(builder
 
 var app = builder.Build();
 
+app.UseExceptionHandler(static _ => { });
 app.MapControllers();
 app.MapHealthChecks("/health");
 app.MapGet("/", () => "Semantic RAG Search API is running");
 
 app.Run();
+
+public partial class Program
+{
+}

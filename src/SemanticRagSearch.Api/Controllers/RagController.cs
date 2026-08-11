@@ -35,10 +35,6 @@ public class RagController : ControllerBase
         {
             return NotFound(new { error = exception.Message });
         }
-        catch (InvalidOperationException exception)
-        {
-            return StatusCode(StatusCodes.Status502BadGateway, new { error = exception.Message });
-        }
     }
 
     [HttpPost("stream")]

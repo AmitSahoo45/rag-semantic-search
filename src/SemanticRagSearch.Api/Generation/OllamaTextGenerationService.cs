@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SemanticRagSearch.Api.Configuration;
+using SemanticRagSearch.Api.Ollama;
 
 namespace SemanticRagSearch.Api.Generation;
 
@@ -44,19 +45,67 @@ public class OllamaTextGenerationService : ITextGenerationService
                 new OllamaChatMessage("user", userPrompt)
             ],
             false);
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+        {
+            Content = JsonContent.Create(request)
+        };
 
         DateTime startedAt = DateTime.UtcNow;
-        using HttpResponseMessage response = await client.PostAsJsonAsync("/api/chat", request, cancellationToken);
+        using HttpResponseMessage response = await SendRequestAsync(
+            client,
+            httpRequest,
+            HttpCompletionOption.ResponseContentRead,
+            cancellationToken);
 
-        await ThrowIfRequestFailedAsync(response, cancellationToken);
+        ThrowIfRequestFailed(response);
 
-        OllamaChatResponse? ollamaResponse =
-            await response.Content.ReadFromJsonAsync<OllamaChatResponse>(cancellationToken);
+        OllamaChatResponse? ollamaResponse;
+
+        try
+        {
+            ollamaResponse =
+                await response.Content.ReadFromJsonAsync<OllamaChatResponse>(
+                    cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            throw CreateTimeoutException("chat response", exception);
+        }
+        catch (JsonException exception)
+        {
+            throw new OllamaProviderException(
+                OllamaFailureKind.InvalidResponse,
+                "The Ollama chat response contained malformed JSON.",
+                innerException: exception);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw new OllamaProviderException(
+                OllamaFailureKind.InvalidResponse,
+                "The Ollama chat response used an unsupported format.",
+                innerException: exception);
+        }
+        catch (IOException exception)
+        {
+            throw CreateUnavailableException("chat response", exception);
+        }
+
+        if (ollamaResponse?.Error is not null)
+        {
+            throw new OllamaProviderException(
+                OllamaFailureKind.InvalidResponse,
+                "The Ollama chat response reported an error.");
+        }
 
         string? answer = ollamaResponse?.Message?.Content;
 
         if (string.IsNullOrWhiteSpace(answer))
-            throw new InvalidOperationException("Ollama did not return a chat response.");
+        {
+            throw new OllamaProviderException(
+                OllamaFailureKind.InvalidResponse,
+                "Ollama did not return a chat response.");
+        }
 
         _logger.LogInformation(
             "Generated RAG answer using {ChatModel} in {ElapsedMilliseconds} ms.",
@@ -88,40 +137,83 @@ public class OllamaTextGenerationService : ITextGenerationService
             Content = JsonContent.Create(request)
         };
 
-        using HttpResponseMessage response = await client.SendAsync(
+        using HttpResponseMessage response = await SendRequestAsync(
+            client,
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
 
-        await ThrowIfRequestFailedAsync(response, cancellationToken);
+        ThrowIfRequestFailed(response);
 
-        await using Stream responseStream =
-            await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var reader = new StreamReader(responseStream);
+        Stream responseStream;
 
-        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        try
         {
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
+            responseStream = await response.Content.ReadAsStreamAsync(
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            throw CreateTimeoutException("streaming response", exception);
+        }
+        catch (HttpRequestException exception)
+        {
+            throw CreateUnavailableException("streaming response", exception);
+        }
+        catch (IOException exception)
+        {
+            throw CreateUnavailableException("streaming response", exception);
+        }
 
-            OllamaChatResponse chunk = ParseStreamingResponse(line);
+        await using (responseStream)
+        {
+            using var reader = new StreamReader(responseStream);
 
-            if (chunk.Error is not null)
+            while (true)
             {
-                string errorDetails = string.IsNullOrWhiteSpace(chunk.Error)
-                    ? "No error details were provided."
-                    : chunk.Error;
+                string? line;
 
-                throw new InvalidOperationException(
-                    $"Ollama streaming request failed. Response: {errorDetails}");
+                try
+                {
+                    line = await reader.ReadLineAsync(cancellationToken);
+                }
+                catch (OperationCanceledException exception)
+                    when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw CreateTimeoutException("streaming response", exception);
+                }
+                catch (IOException exception)
+                {
+                    throw CreateUnavailableException("streaming response", exception);
+                }
+
+                if (line is null)
+                    break;
+
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                OllamaChatResponse chunk = ParseStreamingResponse(line);
+
+                if (chunk.Error is not null)
+                {
+                    throw new OllamaProviderException(
+                        OllamaFailureKind.InvalidResponse,
+                        "The Ollama streaming response reported an error.");
+                }
+
+                string? content = chunk.Message?.Content;
+                if (!string.IsNullOrEmpty(content))
+                    yield return content;
+
+                if (chunk.Done)
+                    yield break;
             }
 
-            string? content = chunk.Message?.Content;
-            if (!string.IsNullOrEmpty(content))
-                yield return content;
-
-            if (chunk.Done)
-                yield break;
+            throw new OllamaProviderException(
+                OllamaFailureKind.InvalidResponse,
+                "The Ollama streaming response ended before completion.");
         }
     }
 
@@ -131,17 +223,39 @@ public class OllamaTextGenerationService : ITextGenerationService
             throw new ArgumentException("Prompt cannot be empty.", parameterName);
     }
 
-    private static async Task ThrowIfRequestFailedAsync(
-        HttpResponseMessage response,
+    private static async Task<HttpResponseMessage> SendRequestAsync(
+        HttpClient client,
+        HttpRequestMessage request,
+        HttpCompletionOption completionOption,
         CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await client.SendAsync(
+                request,
+                completionOption,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            throw CreateTimeoutException("request", exception);
+        }
+        catch (HttpRequestException exception)
+        {
+            throw CreateUnavailableException("request", exception);
+        }
+    }
+
+    private static void ThrowIfRequestFailed(HttpResponseMessage response)
     {
         if (response.IsSuccessStatusCode)
             return;
 
-        string errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-        throw new InvalidOperationException(
-            $"Ollama chat request failed with status {(int)response.StatusCode} " +
-            $"({response.ReasonPhrase}). Response: {errorBody}");
+        throw new OllamaProviderException(
+            OllamaFailureKind.InvalidResponse,
+            $"The Ollama chat request returned HTTP {(int)response.StatusCode}.",
+            response.StatusCode);
     }
 
     private static OllamaChatResponse ParseStreamingResponse(string line)
@@ -155,10 +269,31 @@ public class OllamaTextGenerationService : ITextGenerationService
         }
         catch (JsonException exception)
         {
-            throw new InvalidOperationException(
+            throw new OllamaProviderException(
+                OllamaFailureKind.InvalidResponse,
                 "Ollama returned malformed streaming JSON.",
-                exception);
+                innerException: exception);
         }
+    }
+
+    private static OllamaProviderException CreateTimeoutException(
+        string operation,
+        OperationCanceledException exception)
+    {
+        return new OllamaProviderException(
+            OllamaFailureKind.Timeout,
+            $"The Ollama {operation} timed out.",
+            innerException: exception);
+    }
+
+    private static OllamaProviderException CreateUnavailableException(
+        string operation,
+        Exception exception)
+    {
+        return new OllamaProviderException(
+            OllamaFailureKind.Unavailable,
+            $"The Ollama {operation} was interrupted.",
+            innerException: exception);
     }
 
     private sealed record OllamaChatRequest(

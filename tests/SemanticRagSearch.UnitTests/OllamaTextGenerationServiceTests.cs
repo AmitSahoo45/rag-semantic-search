@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Generation;
+using SemanticRagSearch.Api.Ollama;
 
 namespace SemanticRagSearch.UnitTests;
 
@@ -102,35 +103,37 @@ public class OllamaTextGenerationServiceTests
     }
 
     [Fact]
-    public async Task GenerateStreamAsync_ThrowsUsefulErrorForNonSuccessStatus()
+    public async Task GenerateStreamAsync_ClassifiesHttpFailureWithoutProviderBody()
     {
         OllamaTextGenerationService service = CreateService(
             (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)
             {
-                Content = new StringContent("model failed")
+                Content = new StringContent("secret provider body")
             }));
 
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
             () => CollectAsync(service.GenerateStreamAsync("system", "user")));
 
-        Assert.Contains("500", exception.Message);
-        Assert.Contains("model failed", exception.Message);
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.Equal(HttpStatusCode.InternalServerError, exception.UpstreamStatusCode);
+        Assert.DoesNotContain("secret provider body", exception.Message);
     }
 
     [Fact]
-    public async Task GenerateAsync_ThrowsUsefulErrorForNonSuccessStatus()
+    public async Task GenerateAsync_ClassifiesHttpFailureWithoutProviderBody()
     {
         OllamaTextGenerationService service = CreateService(
             (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway)
             {
-                Content = new StringContent("provider unavailable")
+                Content = new StringContent("secret provider body")
             }));
 
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
             () => service.GenerateAsync("system", "user"));
 
-        Assert.Contains("502", exception.Message);
-        Assert.Contains("provider unavailable", exception.Message);
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.Equal(HttpStatusCode.BadGateway, exception.UpstreamStatusCode);
+        Assert.DoesNotContain("secret provider body", exception.Message);
     }
 
     [Fact]
@@ -143,10 +146,11 @@ public class OllamaTextGenerationServiceTests
                 {"error":"generation failed"}
                 """)));
 
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
             () => CollectAsync(service.GenerateStreamAsync("system", "user")));
 
-        Assert.Contains("generation failed", exception.Message);
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.DoesNotContain("generation failed", exception.Message);
     }
 
     [Fact]
@@ -155,12 +159,10 @@ public class OllamaTextGenerationServiceTests
         OllamaTextGenerationService service = CreateService(
             (_, _) => Task.FromResult(NdjsonResponse("""{"error":""}""")));
 
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
             () => CollectAsync(service.GenerateStreamAsync("system", "user")));
 
-        Assert.Equal(
-            "Ollama streaming request failed. Response: No error details were provided.",
-            exception.Message);
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
     }
 
     [Fact]
@@ -169,10 +171,10 @@ public class OllamaTextGenerationServiceTests
         OllamaTextGenerationService service = CreateService(
             (_, _) => Task.FromResult(NdjsonResponse("{not-json}")));
 
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
             () => CollectAsync(service.GenerateStreamAsync("system", "user")));
 
-        Assert.Equal("Ollama returned malformed streaming JSON.", exception.Message);
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
         Assert.IsType<JsonException>(exception.InnerException);
     }
 
@@ -183,10 +185,112 @@ public class OllamaTextGenerationServiceTests
             (_, _) => Task.FromResult(JsonResponse(
                 """{"message":{"role":"assistant","content":" "},"done":true}""")));
 
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
             () => service.GenerateAsync("system", "user"));
 
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
         Assert.Equal("Ollama did not return a chat response.", exception.Message);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ClassifiesMalformedJsonAsInvalidResponse()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => Task.FromResult(JsonResponse("{not-json}")));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => service.GenerateAsync("system", "user"));
+
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.IsType<JsonException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ClassifiesInBandErrorWithoutProviderBody()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => Task.FromResult(JsonResponse(
+                """{"error":"secret provider body"}""")));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => service.GenerateAsync("system", "user"));
+
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.DoesNotContain("secret provider body", exception.Message);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ClassifiesNetworkFailureAsUnavailable()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => throw new HttpRequestException("connection refused"));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => service.GenerateAsync("system", "user"));
+
+        Assert.Equal(OllamaFailureKind.Unavailable, exception.FailureKind);
+        Assert.IsType<HttpRequestException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ClassifiesProviderCancellationAsTimeout()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => throw new OperationCanceledException(
+                "provider timeout",
+                new TimeoutException(),
+                CancellationToken.None));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => service.GenerateAsync("system", "user"));
+
+        Assert.Equal(OllamaFailureKind.Timeout, exception.FailureKind);
+        Assert.IsType<OperationCanceledException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_PreservesCallerCancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        OllamaTextGenerationService service = CreateService(
+            (_, token) => Task.FromCanceled<HttpResponseMessage>(token));
+
+        OperationCanceledException exception =
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => service.GenerateAsync("system", "user", cancellation.Token));
+
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+        Assert.IsNotType<OllamaProviderException>(exception);
+    }
+
+    [Fact]
+    public async Task GenerateStreamAsync_ClassifiesResponseIoFailureAsUnavailable()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new ThrowingReadStream())
+            }));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => CollectAsync(service.GenerateStreamAsync("system", "user")));
+
+        Assert.Equal(OllamaFailureKind.Unavailable, exception.FailureKind);
+        Assert.IsType<IOException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task GenerateStreamAsync_ClassifiesEofBeforeDoneAsInvalidResponse()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => Task.FromResult(NdjsonResponse(
+                """{"message":{"role":"assistant","content":"partial"},"done":false}""")));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => CollectAsync(service.GenerateStreamAsync("system", "user")));
+
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
     }
 
     [Fact]
@@ -296,6 +400,27 @@ public class OllamaTextGenerationServiceTests
             Assert.Equal(HttpMethod.Post, request.Method);
             Assert.Equal("/api/chat", request.RequestUri?.AbsolutePath);
             return handler(request, cancellationToken);
+        }
+    }
+
+    private sealed class ThrowingReadStream : MemoryStream
+    {
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromException<int>(
+                new IOException("response stream interrupted"));
+        }
+
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            return Task.FromException<int>(
+                new IOException("response stream interrupted"));
         }
     }
 

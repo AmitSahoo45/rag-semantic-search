@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Embedding;
+using SemanticRagSearch.Api.Ollama;
 
 namespace SemanticRagSearch.UnitTests;
 
@@ -60,17 +61,89 @@ public class OllamaEmbeddingServiceTests
     }
 
     [Fact]
-    public async Task EmbedAsync_ThrowsWhenOllamaReturnsFailure()
+    public async Task EmbedAsync_ClassifiesHttpFailureWithoutProviderBody()
     {
         var service = CreateService(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)
         {
-            Content = new StringContent("model failed")
+            Content = new StringContent("secret provider body")
         }));
 
-        InvalidOperationException exception =
-            await Assert.ThrowsAsync<InvalidOperationException>(() => service.EmbedAsync("hello"));
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => service.EmbedAsync("hello"));
 
-        Assert.Contains("500", exception.Message);
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.Equal(HttpStatusCode.InternalServerError, exception.UpstreamStatusCode);
+        Assert.DoesNotContain("secret provider body", exception.Message);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ClassifiesMalformedJsonAsInvalidResponse()
+    {
+        var service = CreateService(_ => Task.FromResult(JsonResponse("{not-json}")));
+
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => service.EmbedAsync("hello"));
+
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+        Assert.IsType<JsonException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ClassifiesNullEmbeddingAsInvalidResponse()
+    {
+        var service = CreateService(_ => Task.FromResult(
+            JsonResponse("""{"embeddings":[null]}""")));
+
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(
+                () => service.EmbedAsync("hello"));
+
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ClassifiesNetworkFailureAsUnavailable()
+    {
+        var service = CreateService(
+            (_, _) => throw new HttpRequestException("connection refused"));
+
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => service.EmbedAsync("hello"));
+
+        Assert.Equal(OllamaFailureKind.Unavailable, exception.FailureKind);
+        Assert.IsType<HttpRequestException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ClassifiesProviderCancellationAsTimeout()
+    {
+        var service = CreateService(
+            (_, _) => throw new OperationCanceledException(
+                "provider timeout",
+                new TimeoutException(),
+                CancellationToken.None));
+
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => service.EmbedAsync("hello"));
+
+        Assert.Equal(OllamaFailureKind.Timeout, exception.FailureKind);
+        Assert.IsType<OperationCanceledException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_PreservesCallerCancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var service = CreateService(
+            (_, token) => Task.FromCanceled<HttpResponseMessage>(token));
+
+        OperationCanceledException exception =
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => service.EmbedAsync("hello", cancellation.Token));
+
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+        Assert.IsNotType<OllamaProviderException>(exception);
     }
 
     [Fact]
@@ -78,9 +151,10 @@ public class OllamaEmbeddingServiceTests
     {
         var service = CreateService(_ => Task.FromResult(JsonResponse("""{"embeddings":[[0.1,0.2]]}""")));
 
-        InvalidOperationException exception =
-            await Assert.ThrowsAsync<InvalidOperationException>(() => service.EmbedAsync("hello"));
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => service.EmbedAsync("hello"));
 
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
         Assert.Contains("dimension 2", exception.Message);
         Assert.Contains("3 was expected", exception.Message);
     }
@@ -90,14 +164,21 @@ public class OllamaEmbeddingServiceTests
     {
         var service = CreateService(_ => Task.FromResult(JsonResponse("""{"embeddings":[[0.1,0.2,0.3]]}""")));
 
-        InvalidOperationException exception =
-            await Assert.ThrowsAsync<InvalidOperationException>(() => service.EmbedBatchAsync(["one", "two"]));
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => service.EmbedBatchAsync(["one", "two"]));
 
+        Assert.Equal(OllamaFailureKind.InvalidResponse, exception.FailureKind);
         Assert.Contains("1 embeddings for 2 input texts", exception.Message);
     }
 
     private static OllamaEmbeddingService CreateService(
         Func<HttpRequestMessage, Task<HttpResponseMessage>> handler)
+    {
+        return CreateService((request, _) => handler(request));
+    }
+
+    private static OllamaEmbeddingService CreateService(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
     {
         var httpClient = new HttpClient(new TestHttpMessageHandler(handler))
         {
@@ -135,7 +216,8 @@ public class OllamaEmbeddingServiceTests
     }
 
     private sealed class TestHttpMessageHandler(
-        Func<HttpRequestMessage, Task<HttpResponseMessage>> handler) : HttpMessageHandler
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
+        : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -144,7 +226,7 @@ public class OllamaEmbeddingServiceTests
             Assert.Equal(HttpMethod.Post, request.Method);
             Assert.Equal("/api/embed", request.RequestUri?.AbsolutePath);
 
-            return handler(request);
+            return handler(request, cancellationToken);
         }
     }
 }
