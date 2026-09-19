@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Pgvector;
 using SemanticRagSearch.Api.Chunking;
 using SemanticRagSearch.Api.Data;
@@ -13,6 +14,8 @@ public class DocumentIngestionService : IDocumentIngestionService
 {
     private const int MaxTitleLength = 300;
     private const int MaxSourceUrlLength = 2048;
+    private const string DocumentContentHashConstraint = "IX_documents_tenant_id_content_hash";
+    private const string ChunkIndexConstraint = "IX_chunks_document_id_chunk_index";
 
     private readonly AppDbContext _dbContext;
     private readonly IChunkingService _chunkingService;
@@ -111,7 +114,36 @@ public class DocumentIngestionService : IDocumentIngestionService
             _dbContext.Documents.Add(document);
 
         _dbContext.Chunks.AddRange(chunks);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsConcurrentDuplicateViolation(exception, isNewDocument))
+        {
+            _dbContext.ChangeTracker.Clear();
+
+            var winner = await _dbContext.Documents
+                .AsNoTracking()
+                .Where(candidate =>
+                    candidate.TenantId == request.TenantId &&
+                    candidate.ContentHash == contentHash)
+                .Select(candidate => new
+                {
+                    candidate.DocumentId,
+                    ChunkCount = candidate.Chunks.Count
+                })
+                .SingleOrDefaultAsync(cancellationToken);
+
+            if (winner is null || winner.ChunkCount == 0)
+                throw;
+
+            _logger.LogInformation(
+                "Resolved concurrent duplicate document ingestion for tenant {TenantId}. Existing document: {DocumentId}.",
+                request.TenantId,
+                winner.DocumentId);
+
+            return new DocumentIngestionResult(winner.DocumentId, winner.ChunkCount, true);
+        }
 
         _logger.LogInformation(
             "Ingested document {DocumentId} for tenant {TenantId} with {ChunkCount} chunk(s).",
@@ -157,5 +189,25 @@ public class DocumentIngestionService : IDocumentIngestionService
         byte[] hashBytes = SHA256.HashData(contentBytes);
 
         return Convert.ToHexString(hashBytes).ToLowerInvariant();
+    }
+
+    private static bool IsConcurrentDuplicateViolation(
+        DbUpdateException exception,
+        bool isNewDocument)
+    {
+        if (exception.InnerException is not PostgresException postgresException ||
+            postgresException.SqlState != PostgresErrorCodes.UniqueViolation)
+        {
+            return false;
+        }
+
+        string expectedConstraint = isNewDocument
+            ? DocumentContentHashConstraint
+            : ChunkIndexConstraint;
+
+        return string.Equals(
+            postgresException.ConstraintName,
+            expectedConstraint,
+            StringComparison.Ordinal);
     }
 }

@@ -102,6 +102,7 @@ public class RagServiceTests
         Assert.Contains("Answer only from the provided context chunks.", systemPrompt);
         Assert.Contains("[1] Document: Grounding document", userPrompt);
         Assert.Contains("first source", userPrompt);
+        Assert.EndsWith("first source" + Environment.NewLine, userPrompt);
     }
 
     [Fact]
@@ -280,6 +281,7 @@ public class RagServiceTests
         string prompt = Assert.IsType<string>(userPrompt);
         Assert.Contains("[1] Document: Grounding document", prompt);
         Assert.Contains("evidence", prompt);
+        Assert.EndsWith("evidence" + Environment.NewLine, prompt);
     }
 
     [Fact]

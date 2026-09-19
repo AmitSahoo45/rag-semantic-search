@@ -51,7 +51,8 @@ public class RagController : ControllerBase
                 new { error = "Request body is required." });
         }
 
-        return TypedResults.ServerSentEvents(
-            _ragService.AskStreamAsync(request, cancellationToken));
+        return new RagStreamResult(
+            _ragService.AskStreamAsync(request, cancellationToken),
+            cancellationToken);
     }
 }

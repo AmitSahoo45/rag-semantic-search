@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
+using Npgsql;
 using SemanticRagSearch.Api.Chunking;
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Data;
@@ -13,6 +15,441 @@ namespace SemanticRagSearch.UnitTests;
 
 public class DocumentIngestionServiceTests
 {
+    [Fact]
+    public async Task IngestAsync_ReturnsCommittedWinnerWhenNewDocumentRaceLoses()
+    {
+        const string content = "retry content";
+        const string contentHash = "228f1a3808d21637a5fb75d024db2a764a498292f9da1eff946568c374d09d9b";
+        string databaseName = $"document-ingestion-{Guid.NewGuid()}";
+        var databaseRoot = new InMemoryDatabaseRoot();
+        await using InMemoryAppDbContext losingContext = CreateDbContext(databaseName, databaseRoot);
+        Guid tenantId = Guid.NewGuid();
+        Guid winnerDocumentId = Guid.NewGuid();
+
+        losingContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for concurrent document race tests",
+            Email = "concurrent-document-race@example.test"
+        });
+        await losingContext.SaveChangesAsync();
+        losingContext.ChangeTracker.Clear();
+        losingContext.ResetSaveTracking();
+
+        losingContext.FailNextSave(
+            CreateDatabaseException("IX_documents_tenant_id_content_hash"),
+            async () =>
+            {
+                await using InMemoryAppDbContext winningContext = CreateDbContext(databaseName, databaseRoot);
+                winningContext.Documents.Add(new Document
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    Title = "Winning document",
+                    ContentHash = contentHash
+                });
+                winningContext.Chunks.Add(new Chunk
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    ChunkIndex = 0,
+                    TextContent = content,
+                    TokenCount = 3
+                });
+                await winningContext.SaveChangesAsync();
+            });
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            losingContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DocumentIngestionResult result = await service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Losing document", null, content));
+
+        Assert.True(result.WasDuplicate);
+        Assert.Equal(winnerDocumentId, result.DocumentId);
+        Assert.Equal(1, result.ChunkCount);
+        Assert.Equal(1, losingContext.SaveChangesCallCount);
+        Assert.Equal(1, losingContext.AddedDocumentCountAtLastSave);
+        Assert.Equal(1, losingContext.AddedChunkCountAtLastSave);
+        Assert.Empty(losingContext.ChangeTracker.Entries());
+
+        await using InMemoryAppDbContext verificationContext = CreateDbContext(databaseName, databaseRoot);
+        Assert.Single(await verificationContext.Documents.ToListAsync());
+        Assert.Single(await verificationContext.Chunks.ToListAsync());
+    }
+
+    [Fact]
+    public async Task IngestAsync_ReturnsCompletedDocumentWhenZeroChunkRetryRaceLoses()
+    {
+        const string content = "retry content";
+        const string contentHash = "228f1a3808d21637a5fb75d024db2a764a498292f9da1eff946568c374d09d9b";
+        string databaseName = $"document-ingestion-{Guid.NewGuid()}";
+        var databaseRoot = new InMemoryDatabaseRoot();
+        await using InMemoryAppDbContext losingContext = CreateDbContext(databaseName, databaseRoot);
+        Guid tenantId = Guid.NewGuid();
+        Guid documentId = Guid.NewGuid();
+
+        losingContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for concurrent chunk race tests",
+            Email = "concurrent-chunk-race@example.test"
+        });
+        losingContext.Documents.Add(new Document
+        {
+            DocumentId = documentId,
+            TenantId = tenantId,
+            Title = "Incomplete document",
+            ContentHash = contentHash
+        });
+        await losingContext.SaveChangesAsync();
+        losingContext.ChangeTracker.Clear();
+        losingContext.ResetSaveTracking();
+
+        losingContext.FailNextSave(
+            CreateDatabaseException("IX_chunks_document_id_chunk_index"),
+            async () =>
+            {
+                await using InMemoryAppDbContext winningContext = CreateDbContext(databaseName, databaseRoot);
+                winningContext.Chunks.Add(new Chunk
+                {
+                    DocumentId = documentId,
+                    TenantId = tenantId,
+                    ChunkIndex = 0,
+                    TextContent = content,
+                    TokenCount = 3
+                });
+                await winningContext.SaveChangesAsync();
+            });
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            losingContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DocumentIngestionResult result = await service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Incomplete document", null, content));
+
+        Assert.True(result.WasDuplicate);
+        Assert.Equal(documentId, result.DocumentId);
+        Assert.Equal(1, result.ChunkCount);
+        Assert.Equal(1, losingContext.SaveChangesCallCount);
+        Assert.Equal(0, losingContext.AddedDocumentCountAtLastSave);
+        Assert.Equal(1, losingContext.AddedChunkCountAtLastSave);
+        Assert.Empty(losingContext.ChangeTracker.Entries());
+
+        await using InMemoryAppDbContext verificationContext = CreateDbContext(databaseName, databaseRoot);
+        Assert.Single(await verificationContext.Documents.ToListAsync());
+        Assert.Single(await verificationContext.Chunks.ToListAsync());
+    }
+
+    [Fact]
+    public async Task IngestAsync_RethrowsOriginalExceptionWhenRaceWinnerIsMissing()
+    {
+        const string content = "retry content";
+        await using InMemoryAppDbContext dbContext = CreateDbContext();
+        Guid tenantId = Guid.NewGuid();
+        DbUpdateException expectedException = CreateDatabaseException("IX_documents_tenant_id_content_hash");
+
+        dbContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for missing concurrent winner tests",
+            Email = "missing-concurrent-winner@example.test"
+        });
+        await dbContext.SaveChangesAsync();
+        dbContext.ChangeTracker.Clear();
+        dbContext.ResetSaveTracking();
+        dbContext.FailNextSave(expectedException);
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            dbContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DbUpdateException actualException = await Assert.ThrowsAsync<DbUpdateException>(() => service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Missing winner", null, content)));
+
+        Assert.Same(expectedException, actualException);
+    }
+
+    [Fact]
+    public async Task IngestAsync_RethrowsOriginalExceptionWhenRaceWinnerHasNoChunks()
+    {
+        const string content = "retry content";
+        const string contentHash = "228f1a3808d21637a5fb75d024db2a764a498292f9da1eff946568c374d09d9b";
+        string databaseName = $"document-ingestion-{Guid.NewGuid()}";
+        var databaseRoot = new InMemoryDatabaseRoot();
+        await using InMemoryAppDbContext losingContext = CreateDbContext(databaseName, databaseRoot);
+        Guid tenantId = Guid.NewGuid();
+        Guid winnerDocumentId = Guid.NewGuid();
+        DbUpdateException expectedException = CreateDatabaseException("IX_documents_tenant_id_content_hash");
+
+        losingContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for incomplete concurrent winner tests",
+            Email = "incomplete-concurrent-winner@example.test"
+        });
+        await losingContext.SaveChangesAsync();
+        losingContext.ChangeTracker.Clear();
+        losingContext.ResetSaveTracking();
+        losingContext.FailNextSave(
+            expectedException,
+            async () =>
+            {
+                await using InMemoryAppDbContext winningContext = CreateDbContext(databaseName, databaseRoot);
+                winningContext.Documents.Add(new Document
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    Title = "Incomplete winner",
+                    ContentHash = contentHash
+                });
+                await winningContext.SaveChangesAsync();
+            });
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            losingContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DbUpdateException actualException = await Assert.ThrowsAsync<DbUpdateException>(() => service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Incomplete winner", null, content)));
+
+        Assert.Same(expectedException, actualException);
+    }
+
+    [Fact]
+    public async Task IngestAsync_PreservesCancellationDuringRaceRecovery()
+    {
+        const string content = "retry content";
+        const string contentHash = "228f1a3808d21637a5fb75d024db2a764a498292f9da1eff946568c374d09d9b";
+        string databaseName = $"document-ingestion-{Guid.NewGuid()}";
+        var databaseRoot = new InMemoryDatabaseRoot();
+        await using InMemoryAppDbContext losingContext = CreateDbContext(databaseName, databaseRoot);
+        Guid tenantId = Guid.NewGuid();
+        Guid winnerDocumentId = Guid.NewGuid();
+        using var cancellation = new CancellationTokenSource();
+
+        losingContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for concurrent recovery cancellation tests",
+            Email = "concurrent-recovery-cancellation@example.test"
+        });
+        await losingContext.SaveChangesAsync(CancellationToken.None);
+        losingContext.ChangeTracker.Clear();
+        losingContext.ResetSaveTracking();
+        losingContext.FailNextSave(
+            CreateDatabaseException("IX_documents_tenant_id_content_hash"),
+            async () =>
+            {
+                await using InMemoryAppDbContext winningContext = CreateDbContext(databaseName, databaseRoot);
+                winningContext.Documents.Add(new Document
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    Title = "Completed winner",
+                    ContentHash = contentHash
+                });
+                winningContext.Chunks.Add(new Chunk
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    ChunkIndex = 0,
+                    TextContent = content,
+                    TokenCount = 3
+                });
+                await winningContext.SaveChangesAsync(CancellationToken.None);
+                cancellation.Cancel();
+            });
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.Is<CancellationToken>(token => token == cancellation.Token)))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            losingContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Canceled recovery", null, content),
+            cancellation.Token));
+    }
+
+    [Theory]
+    [InlineData("IX_other_constraint", PostgresErrorCodes.UniqueViolation)]
+    [InlineData("IX_documents_tenant_id_content_hash", "23503")]
+    [InlineData("IX_chunks_document_id_chunk_index", PostgresErrorCodes.UniqueViolation)]
+    public async Task IngestAsync_RethrowsNewDocumentDatabaseFailureWhenViolationIsNotRecoverable(
+        string constraintName,
+        string sqlState)
+    {
+        const string content = "retry content";
+        const string contentHash = "228f1a3808d21637a5fb75d024db2a764a498292f9da1eff946568c374d09d9b";
+        string databaseName = $"document-ingestion-{Guid.NewGuid()}";
+        var databaseRoot = new InMemoryDatabaseRoot();
+        await using InMemoryAppDbContext dbContext = CreateDbContext(databaseName, databaseRoot);
+        Guid tenantId = Guid.NewGuid();
+        Guid winnerDocumentId = Guid.NewGuid();
+        DbUpdateException expectedException = CreateDatabaseException(constraintName, sqlState);
+
+        dbContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for unrecoverable database failure tests",
+            Email = "unrecoverable-database-failure@example.test"
+        });
+        await dbContext.SaveChangesAsync();
+        dbContext.ChangeTracker.Clear();
+        dbContext.ResetSaveTracking();
+        dbContext.FailNextSave(
+            expectedException,
+            async () =>
+            {
+                await using InMemoryAppDbContext winningContext = CreateDbContext(databaseName, databaseRoot);
+                winningContext.Documents.Add(new Document
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    Title = "Completed winner",
+                    ContentHash = contentHash
+                });
+                winningContext.Chunks.Add(new Chunk
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    ChunkIndex = 0,
+                    TextContent = content,
+                    TokenCount = 3
+                });
+                await winningContext.SaveChangesAsync();
+            });
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            dbContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DbUpdateException actualException = await Assert.ThrowsAsync<DbUpdateException>(() => service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Unrecoverable failure", null, content)));
+
+        Assert.Same(expectedException, actualException);
+    }
+
+    [Fact]
+    public async Task IngestAsync_RethrowsDatabaseFailureWithNonPostgresInnerException()
+    {
+        const string content = "retry content";
+        const string contentHash = "228f1a3808d21637a5fb75d024db2a764a498292f9da1eff946568c374d09d9b";
+        string databaseName = $"document-ingestion-{Guid.NewGuid()}";
+        var databaseRoot = new InMemoryDatabaseRoot();
+        await using InMemoryAppDbContext dbContext = CreateDbContext(databaseName, databaseRoot);
+        Guid tenantId = Guid.NewGuid();
+        Guid winnerDocumentId = Guid.NewGuid();
+        var expectedException = new DbUpdateException(
+            "Test update failure.",
+            new InvalidOperationException("Not PostgreSQL."));
+
+        dbContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for non-PostgreSQL failure tests",
+            Email = "non-postgresql-failure@example.test"
+        });
+        await dbContext.SaveChangesAsync();
+        dbContext.ChangeTracker.Clear();
+        dbContext.ResetSaveTracking();
+        dbContext.FailNextSave(
+            expectedException,
+            async () =>
+            {
+                await using InMemoryAppDbContext winningContext = CreateDbContext(databaseName, databaseRoot);
+                winningContext.Documents.Add(new Document
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    Title = "Completed winner",
+                    ContentHash = contentHash
+                });
+                winningContext.Chunks.Add(new Chunk
+                {
+                    DocumentId = winnerDocumentId,
+                    TenantId = tenantId,
+                    ChunkIndex = 0,
+                    TextContent = content,
+                    TokenCount = 3
+                });
+                await winningContext.SaveChangesAsync();
+            });
+
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.Is<IReadOnlyList<string>>(texts => texts.Count == 1 && texts[0] == content),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new float[768]]);
+        var service = new DocumentIngestionService(
+            dbContext,
+            CreateChunkingService(),
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DbUpdateException actualException = await Assert.ThrowsAsync<DbUpdateException>(() => service.IngestAsync(
+            new DocumentIngestionRequest(tenantId, "Non-PostgreSQL failure", null, content)));
+
+        Assert.Same(expectedException, actualException);
+    }
+
     [Fact]
     public async Task IngestAsync_PersistsNewDocumentAndChunksInSingleSave()
     {
@@ -318,13 +755,29 @@ public class DocumentIngestionServiceTests
             NullLogger<ChunkingService>.Instance);
     }
 
-    private static InMemoryAppDbContext CreateDbContext()
+    private static InMemoryAppDbContext CreateDbContext(
+        string? databaseName = null,
+        InMemoryDatabaseRoot? databaseRoot = null)
     {
         DbContextOptions<AppDbContext> options = new DbContextOptionsBuilder<AppDbContext>()
-            .UseInMemoryDatabase($"document-ingestion-{Guid.NewGuid()}")
+            .UseInMemoryDatabase(databaseName ?? $"document-ingestion-{Guid.NewGuid()}", databaseRoot)
             .Options;
 
         return new InMemoryAppDbContext(options);
+    }
+
+    private static DbUpdateException CreateDatabaseException(
+        string constraintName,
+        string sqlState = PostgresErrorCodes.UniqueViolation)
+    {
+        var postgresException = new PostgresException(
+            "Test database failure.",
+            "ERROR",
+            "ERROR",
+            sqlState,
+            constraintName: constraintName);
+
+        return new DbUpdateException("Test update failure.", postgresException);
     }
 
     private sealed class InMemoryAppDbContext(DbContextOptions<AppDbContext> options)
@@ -334,8 +787,10 @@ public class DocumentIngestionServiceTests
         public int AddedDocumentCountAtLastSave { get; private set; }
         public int AddedChunkCountAtLastSave { get; private set; }
         public CancellationToken LastSaveCancellationToken { get; private set; }
+        private DbUpdateException? _nextSaveException;
+        private Func<Task>? _beforeFailure;
 
-        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
             SaveChangesCallCount++;
             AddedDocumentCountAtLastSave = ChangeTracker.Entries<Document>()
@@ -344,7 +799,26 @@ public class DocumentIngestionServiceTests
                 .Count(entry => entry.State == EntityState.Added);
             LastSaveCancellationToken = cancellationToken;
 
-            return base.SaveChangesAsync(cancellationToken);
+            DbUpdateException? nextSaveException = _nextSaveException;
+            Func<Task>? beforeFailure = _beforeFailure;
+            _nextSaveException = null;
+            _beforeFailure = null;
+
+            if (nextSaveException is not null)
+            {
+                if (beforeFailure is not null)
+                    await beforeFailure();
+
+                throw nextSaveException;
+            }
+
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+
+        public void FailNextSave(DbUpdateException exception, Func<Task>? beforeFailure = null)
+        {
+            _nextSaveException = exception;
+            _beforeFailure = beforeFailure;
         }
 
         public void ResetSaveTracking()

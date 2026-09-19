@@ -1,11 +1,13 @@
 using System.Reflection;
 using System.Net.ServerSentEvents;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using SemanticRagSearch.Api.Controllers;
+using SemanticRagSearch.Api.Ollama;
 using SemanticRagSearch.Api.Rag;
 
 namespace SemanticRagSearch.UnitTests;
@@ -135,6 +137,70 @@ public class RagControllerTests
         Assert.Equal(cancellation.Token, observedToken);
     }
 
+    [Fact]
+    public async Task AskStream_ProviderFailureAfterFirstEventWritesOneNamedSanitizedError()
+    {
+        var request = new RagRequest(TenantId, "question", null, null);
+        var ragService = new Mock<IRagService>(MockBehavior.Strict);
+        ragService
+            .Setup(service => service.AskStreamAsync(
+                request,
+                It.IsAny<CancellationToken>()))
+            .Returns(StreamThenThrow(
+                new RagStreamEvent("partial", false, null, null),
+                new OllamaProviderException(
+                    OllamaFailureKind.Unavailable,
+                    "secret provider detail")));
+        var controller = new RagController(ragService.Object);
+        DefaultHttpContext context = CreateHttpContext();
+
+        IResult result = controller.AskStream(request, CancellationToken.None);
+        await result.ExecuteAsync(context);
+
+        context.Response.Body.Position = 0;
+        var parsedItems = new List<SseItem<string>>();
+        await foreach (SseItem<string> item in SseParser
+            .Create(context.Response.Body)
+            .EnumerateAsync())
+        {
+            parsedItems.Add(item);
+        }
+
+        Assert.Equal(2, parsedItems.Count);
+        Assert.Equal(SseParser.EventTypeDefault, parsedItems[0].EventType);
+        Assert.Equal("error", parsedItems[1].EventType);
+        using JsonDocument error = JsonDocument.Parse(parsedItems[1].Data);
+        Assert.Equal(
+            "The AI provider is unavailable.",
+            error.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain("secret provider detail", parsedItems[1].Data);
+    }
+
+    [Fact]
+    public async Task AskStream_PreCanceledRequestWritesNothingAndDisposesEnumerator()
+    {
+        var request = new RagRequest(TenantId, "question", null, null);
+        bool disposed = false;
+        var ragService = new Mock<IRagService>(MockBehavior.Strict);
+        ragService
+            .Setup(service => service.AskStreamAsync(
+                request,
+                It.IsAny<CancellationToken>()))
+            .Returns<RagRequest, CancellationToken>((_, token) =>
+                CancelBeforeFirst(() => disposed = true, token));
+        var controller = new RagController(ragService.Object);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        DefaultHttpContext context = CreateHttpContext();
+
+        IResult result = controller.AskStream(request, cancellation.Token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => result.ExecuteAsync(context));
+
+        Assert.True(disposed);
+        Assert.Equal(0, context.Response.Body.Length);
+    }
+
     private static async IAsyncEnumerable<RagStreamEvent> ToAsyncEnumerable(
         IEnumerable<RagStreamEvent> events)
     {
@@ -142,6 +208,33 @@ public class RagControllerTests
         {
             yield return streamEvent;
             await Task.Yield();
+        }
+    }
+
+    private static async IAsyncEnumerable<RagStreamEvent> StreamThenThrow(
+        RagStreamEvent firstEvent,
+        Exception exception,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return firstEvent;
+        await Task.Yield();
+        throw exception;
+    }
+
+    private static async IAsyncEnumerable<RagStreamEvent> CancelBeforeFirst(
+        Action onDisposed,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            yield break;
+        }
+        finally
+        {
+            onDisposed();
         }
     }
 
