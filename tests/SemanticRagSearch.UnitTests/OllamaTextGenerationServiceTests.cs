@@ -3,9 +3,12 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Generation;
 using SemanticRagSearch.Api.Ollama;
+using SemanticRagSearch.Api.Resilience;
 
 namespace SemanticRagSearch.UnitTests;
 
@@ -249,6 +252,99 @@ public class OllamaTextGenerationServiceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_ClassifiesResilienceTimeoutAsTimeout()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => throw new TimeoutRejectedException("attempt timed out"));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => service.GenerateAsync("system", "user"));
+
+        Assert.Equal(OllamaFailureKind.Timeout, exception.FailureKind);
+        Assert.IsType<TimeoutRejectedException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ClassifiesOpenCircuitAsUnavailable()
+    {
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => throw new BrokenCircuitException("circuit is open"));
+
+        OllamaProviderException exception = await Assert.ThrowsAsync<OllamaProviderException>(
+            () => service.GenerateAsync("system", "user"));
+
+        Assert.Equal(OllamaFailureKind.Unavailable, exception.FailureKind);
+        Assert.IsType<BrokenCircuitException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task GenerateStreamAsync_MapsStalledReadToTimeoutAndDisposesStream()
+    {
+        var timeProvider = new ManualTimeProvider();
+        int requestCount = 0;
+        var responseStream = new PrefixThenBlockingStream(
+            Encoding.UTF8.GetBytes(
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"first\"},\"done\":false}\n"));
+        OllamaTextGenerationService service = CreateService(
+            (_, _) =>
+            {
+                requestCount++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(responseStream)
+                });
+            },
+            new OllamaResilienceOptions
+            {
+                StreamingIdleTimeout = TimeSpan.FromSeconds(5)
+            },
+            timeProvider);
+
+        await using IAsyncEnumerator<string> stream = service
+            .GenerateStreamAsync("system", "user")
+            .GetAsyncEnumerator();
+        Assert.True(await stream.MoveNextAsync());
+        Assert.Equal("first", stream.Current);
+
+        Task<bool> stalledRead = stream.MoveNextAsync().AsTask();
+        await responseStream.BlockingReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        timeProvider.Advance(TimeSpan.FromSeconds(5));
+
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => stalledRead);
+        Assert.Equal(OllamaFailureKind.Timeout, exception.FailureKind);
+        Assert.Equal(1, requestCount);
+        Assert.True(responseStream.IsDisposed);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_MapsStalledResponseBodyToTimeout()
+    {
+        var timeProvider = new ManualTimeProvider();
+        var responseStream = new BlockingTrackingStream();
+        OllamaTextGenerationService service = CreateService(
+            (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(responseStream)
+            }),
+            new OllamaResilienceOptions
+            {
+                AttemptTimeout = TimeSpan.FromSeconds(4),
+                TotalRequestTimeout = TimeSpan.FromSeconds(5)
+            },
+            timeProvider);
+
+        Task<string> generation = service.GenerateAsync("system", "user");
+        await responseStream.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        timeProvider.Advance(TimeSpan.FromSeconds(5));
+
+        OllamaProviderException exception =
+            await Assert.ThrowsAsync<OllamaProviderException>(() => generation);
+        Assert.Equal(OllamaFailureKind.Timeout, exception.FailureKind);
+        Assert.True(responseStream.IsDisposed);
+    }
+
+    [Fact]
     public async Task GenerateAsync_PreservesCallerCancellation()
     {
         using var cancellation = new CancellationTokenSource();
@@ -313,7 +409,8 @@ public class OllamaTextGenerationServiceTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => collection);
 
         Assert.Equal(cancellation.Token, exception.CancellationToken);
-        Assert.Equal(cancellation.Token, responseStream.ReadCancellationToken);
+        Assert.True(responseStream.ReadCancellationToken.CanBeCanceled);
+        Assert.True(responseStream.ReadCancellationToken.IsCancellationRequested);
         Assert.True(responseStream.IsDisposed);
     }
 
@@ -351,7 +448,9 @@ public class OllamaTextGenerationServiceTests
     }
 
     private static OllamaTextGenerationService CreateService(
-        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler,
+        OllamaResilienceOptions? resilienceOptions = null,
+        TimeProvider? timeProvider = null)
     {
         var httpClient = new HttpClient(new TestHttpMessageHandler(handler))
         {
@@ -361,7 +460,9 @@ public class OllamaTextGenerationServiceTests
         return new OllamaTextGenerationService(
             new TestHttpClientFactory(httpClient),
             Options.Create(new OllamaSettings { ChatModel = "llama3.2" }),
-            NullLogger<OllamaTextGenerationService>.Instance);
+            NullLogger<OllamaTextGenerationService>.Instance,
+            Options.Create(resilienceOptions ?? new OllamaResilienceOptions()),
+            timeProvider ?? TimeProvider.System);
     }
 
     private static HttpResponseMessage JsonResponse(string json)
@@ -528,6 +629,190 @@ public class OllamaTextGenerationServiceTests
         {
             IsDisposed = true;
             await base.DisposeAsync();
+        }
+    }
+
+    private sealed class PrefixThenBlockingStream(byte[] prefix) : Stream
+    {
+        private readonly TaskCompletionSource _blockingReadStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _position;
+
+        public Task BlockingReadStarted => _blockingReadStarted.Task;
+
+        public bool IsDisposed { get; private set; }
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            if (_position < prefix.Length)
+            {
+                int bytesToCopy = Math.Min(buffer.Length, prefix.Length - _position);
+                prefix.AsMemory(_position, bytesToCopy).CopyTo(buffer);
+                _position += bytesToCopy;
+                return ValueTask.FromResult(bytesToCopy);
+            }
+
+            _blockingReadStarted.TrySetResult();
+            return new ValueTask<int>(WaitForCancellationAsync(cancellationToken));
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            IsDisposed = true;
+            return base.DisposeAsync();
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        private static async Task<int> WaitForCancellationAsync(
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private readonly object _sync = new();
+        private readonly List<ManualTimer> _timers = [];
+        private long _timestamp;
+
+        public override long GetTimestamp()
+        {
+            lock (_sync)
+                return _timestamp;
+        }
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override ITimer CreateTimer(
+            TimerCallback callback,
+            object? state,
+            TimeSpan dueTime,
+            TimeSpan period)
+        {
+            var timer = new ManualTimer(this, callback, state, dueTime, period);
+            lock (_sync)
+                _timers.Add(timer);
+
+            return timer;
+        }
+
+        public void Advance(TimeSpan duration)
+        {
+            List<(TimerCallback Callback, object? State)> callbacks = [];
+            lock (_sync)
+            {
+                _timestamp += duration.Ticks;
+                foreach (ManualTimer timer in _timers.ToArray())
+                {
+                    if (timer.TryFire(_timestamp, out TimerCallback? callback, out object? state))
+                        callbacks.Add((callback, state));
+                }
+            }
+
+            foreach ((TimerCallback callback, object? state) in callbacks)
+                callback(state);
+        }
+
+        private sealed class ManualTimer : ITimer
+        {
+            private readonly ManualTimeProvider _owner;
+            private readonly TimerCallback _callback;
+            private readonly object? _state;
+            private long _dueTimestamp;
+            private TimeSpan _period;
+            private bool _disposed;
+
+            public ManualTimer(
+                ManualTimeProvider owner,
+                TimerCallback callback,
+                object? state,
+                TimeSpan dueTime,
+                TimeSpan period)
+            {
+                _owner = owner;
+                _callback = callback;
+                _state = state;
+                Change(dueTime, period);
+            }
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                lock (_owner._sync)
+                {
+                    if (_disposed)
+                        return false;
+
+                    _dueTimestamp = dueTime == Timeout.InfiniteTimeSpan
+                        ? long.MaxValue
+                        : checked(_owner._timestamp + dueTime.Ticks);
+                    _period = period;
+                    return true;
+                }
+            }
+
+            public void Dispose()
+            {
+                lock (_owner._sync)
+                    _disposed = true;
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+
+            public bool TryFire(
+                long timestamp,
+                out TimerCallback callback,
+                out object? state)
+            {
+                callback = _callback;
+                state = _state;
+                if (_disposed || timestamp < _dueTimestamp)
+                    return false;
+
+                _dueTimestamp = _period == Timeout.InfiniteTimeSpan
+                    ? long.MaxValue
+                    : checked(timestamp + _period.Ticks);
+                return true;
+            }
         }
     }
 }

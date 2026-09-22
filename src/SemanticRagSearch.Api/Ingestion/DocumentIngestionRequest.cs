@@ -4,4 +4,4 @@ public sealed record DocumentIngestionRequest(
     Guid TenantId,
     string Title,
     string? SourceUrl,
-    string Content);
+    string Content) : Authentication.ITenantRequest;

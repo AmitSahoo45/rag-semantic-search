@@ -45,7 +45,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
             "ALPHA retrieval facts for the integration test.");
 
         using HttpResponseMessage createResponse =
-            await client.PostAsJsonAsync("/api/v1/documents", request);
+            await client.PostTenantJsonAsync("/api/v1/documents", request);
         DocumentIngestionResult created = await ReadAsync<DocumentIngestionResult>(createResponse);
 
         Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
@@ -53,7 +53,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         Assert.True(created.ChunkCount > 0);
         Assert.Equal(768, await ReadVectorDimensionsAsync(created.DocumentId));
 
-        using HttpResponseMessage searchResponse = await client.PostAsJsonAsync(
+        using HttpResponseMessage searchResponse = await client.PostTenantJsonAsync(
             "/api/v1/search",
             new SemanticSearchRequest(tenant.TenantId, "ALPHA query", 5, 0.99));
         SemanticSearchResponse search = await ReadAsync<SemanticSearchResponse>(searchResponse);
@@ -65,7 +65,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         Assert.Equal("https://example.test/alpha", match.SourceUrl);
         Assert.InRange(match.Score, 0.999, 1.0);
 
-        using HttpResponseMessage duplicateResponse = await client.PostAsJsonAsync(
+        using HttpResponseMessage duplicateResponse = await client.PostTenantJsonAsync(
             "/api/v1/documents",
             request with { Title = "A changed title is ignored for duplicate content" });
         DocumentIngestionResult duplicate = await ReadAsync<DocumentIngestionResult>(duplicateResponse);
@@ -130,7 +130,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         using var factory = new PostgresApiFactory(postgres.ConnectionString, embeddings);
         using HttpClient client = factory.CreateClient();
 
-        using HttpResponseMessage response = await client.PostAsJsonAsync(
+        using HttpResponseMessage response = await client.PostTenantJsonAsync(
             "/api/v1/documents",
             new DocumentIngestionRequest(
                 tenant.TenantId,
@@ -185,7 +185,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         using var factory = new PostgresApiFactory(postgres.ConnectionString, embeddings);
         using HttpClient client = factory.CreateClient();
 
-        using HttpResponseMessage response = await client.PostAsJsonAsync(
+        using HttpResponseMessage response = await client.PostTenantJsonAsync(
             "/api/v1/documents",
             new DocumentIngestionRequest(tenant.TenantId, "Retry", null, content));
         DocumentIngestionResult result = await ReadAsync<DocumentIngestionResult>(response);
@@ -257,8 +257,12 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         try
         {
             await migrator.MigrateAsync(InitialMigration);
-            dbContext.Tenants.Add(unrelated);
-            await dbContext.SaveChangesAsync();
+            // This schema predates ApiKeyHash; insert only columns available at that migration.
+            await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO tenants (tenant_id, tenant_name, tenant_description, email, created_date, last_modified_date, is_active)
+                VALUES ({unrelated.TenantId}, {unrelated.TenantName}, {unrelated.TenantDescription}, {unrelated.Email},
+                    {unrelated.CreatedDate}, {unrelated.LastModifiedDate}, {unrelated.IsActive})
+                """);
 
             await dbContext.Database.MigrateAsync();
             dbContext.ChangeTracker.Clear();
@@ -359,7 +363,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         HttpClient client,
         DocumentIngestionRequest request)
     {
-        using HttpResponseMessage response = await client.PostAsJsonAsync("/api/v1/documents", request);
+        using HttpResponseMessage response = await client.PostTenantJsonAsync("/api/v1/documents", request);
         return await ReadAsync<DocumentIngestionResult>(response);
     }
 
@@ -367,7 +371,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         HttpClient client,
         SemanticSearchRequest request)
     {
-        using HttpResponseMessage response = await client.PostAsJsonAsync("/api/v1/search", request);
+        using HttpResponseMessage response = await client.PostTenantJsonAsync("/api/v1/search", request);
         return await ReadAsync<SemanticSearchResponse>(response);
     }
 
@@ -385,6 +389,7 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         return new Tenant
         {
             TenantId = id,
+            ApiKeyHash = TenantApiTestExtensions.HashFor(id),
             TenantName = label,
             TenantDescription = $"Integration test tenant {label}",
             Email = $"{label}-{id:N}@example.test",
@@ -422,6 +427,8 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseSetting("ConnectionStrings:DefaultConnection", connectionString);
+            builder.UseSetting("App:RateLimiting:Enabled", "false");
+            builder.UseSetting("OpenTelemetry:ExportEnabled", "false");
             builder.ConfigureLogging(logging => logging.ClearProviders());
             builder.ConfigureTestServices(services =>
             {

@@ -37,6 +37,12 @@ public class TenantConfiguration : IEntityTypeConfiguration<Tenant>
             .HasColumnName("api_key")
             .HasMaxLength(256);
 
+        builder.Property(t => t.ApiKeyHash)
+            .HasColumnName("api_key_hash")
+            .HasMaxLength(64);
+
+        builder.HasIndex(t => t.ApiKeyHash).IsUnique();
+
         builder.Property(t => t.CreatedDate)
             .HasColumnName("created_date")
             .IsRequired();

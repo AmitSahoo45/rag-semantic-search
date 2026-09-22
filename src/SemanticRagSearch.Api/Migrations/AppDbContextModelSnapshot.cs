@@ -123,6 +123,11 @@ namespace SemanticRagSearch.Api.Migrations
                         .HasColumnType("character varying(256)")
                         .HasColumnName("api_key");
 
+                    b.Property<string>("ApiKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("api_key_hash");
+
                     b.Property<DateTime>("CreatedDate")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_date");
@@ -154,6 +159,9 @@ namespace SemanticRagSearch.Api.Migrations
                         .HasColumnName("tenant_name");
 
                     b.HasKey("TenantId");
+
+                    b.HasIndex("ApiKeyHash")
+                        .IsUnique();
 
                     b.HasIndex("Email")
                         .IsUnique();

@@ -1,8 +1,11 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Ollama;
+using SemanticRagSearch.Api.Resilience;
 
 namespace SemanticRagSearch.Api.Embedding;
 
@@ -11,15 +14,22 @@ public class OllamaEmbeddingService : IEmbeddingService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly OllamaSettings _options;
     private readonly ILogger<OllamaEmbeddingService> _logger;
+    private readonly TimeSpan _totalRequestTimeout;
+    private readonly TimeProvider _timeProvider;
 
     public OllamaEmbeddingService(
         IHttpClientFactory httpClientFactory,
         IOptions<OllamaSettings> options,
-        ILogger<OllamaEmbeddingService> logger)
+        ILogger<OllamaEmbeddingService> logger,
+        IOptions<OllamaResilienceOptions>? resilienceOptions = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClientFactory = httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _totalRequestTimeout = (resilienceOptions?.Value ?? new OllamaResilienceOptions())
+            .TotalRequestTimeout;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<float[]> EmbedAsync(string text, CancellationToken cancellationToken = default)
@@ -55,6 +65,10 @@ public class OllamaEmbeddingService : IEmbeddingService
         HttpClient client = _httpClientFactory.CreateClient("Ollama");
         object input = texts.Count == 1 ? texts[0] : texts;
         var request = new OllamaEmbedRequest(_options.EmbeddingModel, input);
+        using var deadline = new OllamaRequestDeadline(
+            _timeProvider,
+            _totalRequestTimeout,
+            cancellationToken);
 
         DateTime startedAt = DateTime.UtcNow;
         HttpResponseMessage response;
@@ -64,7 +78,21 @@ public class OllamaEmbeddingService : IEmbeddingService
             response = await client.PostAsJsonAsync(
                 "/api/embed",
                 request,
-                cancellationToken);
+                deadline.Token);
+        }
+        catch (TimeoutRejectedException exception)
+        {
+            throw new OllamaProviderException(
+                OllamaFailureKind.Timeout,
+                "The Ollama embedding request timed out.",
+                innerException: exception);
+        }
+        catch (BrokenCircuitException exception)
+        {
+            throw new OllamaProviderException(
+                OllamaFailureKind.Unavailable,
+                "The Ollama embedding service is temporarily unavailable.",
+                innerException: exception);
         }
         catch (OperationCanceledException exception)
             when (!cancellationToken.IsCancellationRequested)
@@ -73,6 +101,14 @@ public class OllamaEmbeddingService : IEmbeddingService
                 OllamaFailureKind.Timeout,
                 "The Ollama embedding request timed out.",
                 innerException: exception);
+        }
+        catch (OperationCanceledException exception)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                exception.Message,
+                exception,
+                cancellationToken);
         }
         catch (HttpRequestException exception)
         {
@@ -98,7 +134,7 @@ public class OllamaEmbeddingService : IEmbeddingService
             {
                 ollamaResponse =
                     await response.Content.ReadFromJsonAsync<OllamaEmbedResponse>(
-                        cancellationToken);
+                        deadline.Token);
             }
             catch (OperationCanceledException exception)
                 when (!cancellationToken.IsCancellationRequested)
@@ -107,6 +143,14 @@ public class OllamaEmbeddingService : IEmbeddingService
                     OllamaFailureKind.Timeout,
                     "The Ollama embedding response timed out.",
                     innerException: exception);
+            }
+            catch (OperationCanceledException exception)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(
+                    exception.Message,
+                    exception,
+                    cancellationToken);
             }
             catch (JsonException exception)
             {

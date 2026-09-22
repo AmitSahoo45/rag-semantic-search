@@ -188,9 +188,12 @@ public class ProviderErrorApiTests
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseSetting("App:RateLimiting:Enabled", "false");
+            builder.UseSetting("OpenTelemetry:ExportEnabled", "false");
             builder.ConfigureLogging(logging => logging.ClearProviders());
             builder.ConfigureTestServices(services =>
             {
+                services.AddContractTenantStore();
                 services.RemoveAll<IDocumentIngestionService>();
                 services.RemoveAll<ISemanticSearchService>();
                 services.RemoveAll<IRagService>();
@@ -201,6 +204,12 @@ public class ProviderErrorApiTests
                 services.AddSingleton<IRagService>(
                     new ThrowingRagService(exception));
             });
+        }
+
+        protected override void ConfigureClient(HttpClient client)
+        {
+            base.ConfigureClient(client);
+            client.DefaultRequestHeaders.Add("X-API-Key", TenantApiTestExtensions.KeyFor(TenantApiTestExtensions.ContractTenantId));
         }
     }
 

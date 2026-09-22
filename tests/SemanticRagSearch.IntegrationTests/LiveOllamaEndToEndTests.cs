@@ -30,7 +30,7 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
         CancellationToken token = deadline.Token;
         using var factory = new LiveApiFactory(database.ConnectionString, output);
         using HttpClient client = factory.CreateClient();
-        client.Timeout = TimeSpan.FromMinutes(3);
+        client.Timeout = TimeSpan.FromMinutes(4);
         OllamaSettings settings = factory.Services.GetRequiredService<IOptions<OllamaSettings>>().Value;
 
         // Fail explicitly when opted in without both actual models; never replace the provider.
@@ -45,11 +45,13 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
         Assert.Equal(HttpStatusCode.OK, health.StatusCode);
 
         Guid tenantId = Guid.NewGuid();
+        client.DefaultRequestHeaders.Add("X-API-Key", TenantApiTestExtensions.KeyFor(tenantId));
         await using (var context = database.CreateDbContext())
         {
             context.Tenants.Add(new Tenant
             {
                 TenantId = tenantId,
+                ApiKeyHash = TenantApiTestExtensions.HashFor(tenantId),
                 TenantName = "Live verification",
                 TenantDescription = "Isolated live-provider test tenant",
                 Email = $"live-{tenantId:N}@example.test"
@@ -138,7 +140,7 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
         Assert.Equal("application/json", invalid.Content.Headers.ContentType?.MediaType);
         using HttpResponseMessage missingTenant = await client.PostAsJsonAsync("/api/v1/ask/stream", request with { TenantId = Guid.NewGuid() }, token);
-        Assert.Equal(HttpStatusCode.NotFound, missingTenant.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, missingTenant.StatusCode);
 
         // Check both transports before evaluating the model's answers so failures retain full diagnostics.
         Assert.True(
@@ -154,6 +156,10 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseSetting("App:RateLimiting:Enabled", "true");
+            builder.UseSetting("OpenTelemetry:ExportEnabled",
+                Environment.GetEnvironmentVariable("RAG_EXPORT_TEST_TELEMETRY") == "1" ? "true" : "false");
+            builder.UseSetting("OpenTelemetry:ServiceName", "SemanticRagSearch.Phase3Verification");
             builder.ConfigureLogging(logging => logging.ClearProviders());
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
                 new Dictionary<string, string?>

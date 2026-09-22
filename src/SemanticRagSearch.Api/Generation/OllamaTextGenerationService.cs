@@ -2,8 +2,11 @@ using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 using SemanticRagSearch.Api.Configuration;
 using SemanticRagSearch.Api.Ollama;
+using SemanticRagSearch.Api.Resilience;
 
 namespace SemanticRagSearch.Api.Generation;
 
@@ -15,15 +18,25 @@ public class OllamaTextGenerationService : ITextGenerationService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly OllamaSettings _settings;
     private readonly ILogger<OllamaTextGenerationService> _logger;
+    private readonly TimeSpan _totalRequestTimeout;
+    private readonly TimeSpan _streamingIdleTimeout;
+    private readonly TimeProvider _timeProvider;
 
     public OllamaTextGenerationService(
         IHttpClientFactory httpClientFactory,
         IOptions<OllamaSettings> settings,
-        ILogger<OllamaTextGenerationService> logger)
+        ILogger<OllamaTextGenerationService> logger,
+        IOptions<OllamaResilienceOptions>? resilienceOptions = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClientFactory = httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory));
         _settings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        OllamaResilienceOptions resilience =
+            resilienceOptions?.Value ?? new OllamaResilienceOptions();
+        _totalRequestTimeout = resilience.TotalRequestTimeout;
+        _streamingIdleTimeout = resilience.StreamingIdleTimeout;
+        _timeProvider = timeProvider ?? TimeProvider.System;
 
         if (string.IsNullOrWhiteSpace(_settings.ChatModel))
             throw new InvalidOperationException("Ollama chat model is not configured.");
@@ -49,12 +62,17 @@ public class OllamaTextGenerationService : ITextGenerationService
         {
             Content = JsonContent.Create(request)
         };
+        using var deadline = new OllamaRequestDeadline(
+            _timeProvider,
+            _totalRequestTimeout,
+            cancellationToken);
 
         DateTime startedAt = DateTime.UtcNow;
         using HttpResponseMessage response = await SendRequestAsync(
             client,
             httpRequest,
             HttpCompletionOption.ResponseContentRead,
+            deadline.Token,
             cancellationToken);
 
         ThrowIfRequestFailed(response);
@@ -65,12 +83,20 @@ public class OllamaTextGenerationService : ITextGenerationService
         {
             ollamaResponse =
                 await response.Content.ReadFromJsonAsync<OllamaChatResponse>(
-                    cancellationToken);
+                    deadline.Token);
         }
         catch (OperationCanceledException exception)
             when (!cancellationToken.IsCancellationRequested)
         {
             throw CreateTimeoutException("chat response", exception);
+        }
+        catch (OperationCanceledException exception)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                exception.Message,
+                exception,
+                cancellationToken);
         }
         catch (JsonException exception)
         {
@@ -141,6 +167,7 @@ public class OllamaTextGenerationService : ITextGenerationService
             client,
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken,
             cancellationToken);
 
         ThrowIfRequestFailed(response);
@@ -149,7 +176,8 @@ public class OllamaTextGenerationService : ITextGenerationService
 
         try
         {
-            responseStream = await response.Content.ReadAsStreamAsync(
+            responseStream = await ExecuteWithStreamingIdleTimeoutAsync(
+                response.Content.ReadAsStreamAsync,
                 cancellationToken);
         }
         catch (OperationCanceledException exception)
@@ -176,7 +204,9 @@ public class OllamaTextGenerationService : ITextGenerationService
 
                 try
                 {
-                    line = await reader.ReadLineAsync(cancellationToken);
+                    line = await ExecuteWithStreamingIdleTimeoutAsync(
+                        token => reader.ReadLineAsync(token).AsTask(),
+                        cancellationToken);
                 }
                 catch (OperationCanceledException exception)
                     when (!cancellationToken.IsCancellationRequested)
@@ -227,23 +257,82 @@ public class OllamaTextGenerationService : ITextGenerationService
         HttpClient client,
         HttpRequestMessage request,
         HttpCompletionOption completionOption,
-        CancellationToken cancellationToken)
+        CancellationToken requestCancellationToken,
+        CancellationToken callerCancellationToken)
     {
         try
         {
             return await client.SendAsync(
                 request,
                 completionOption,
-                cancellationToken);
+                requestCancellationToken);
         }
-        catch (OperationCanceledException exception)
-            when (!cancellationToken.IsCancellationRequested)
+        catch (TimeoutRejectedException exception)
         {
             throw CreateTimeoutException("request", exception);
+        }
+        catch (BrokenCircuitException exception)
+        {
+            throw CreateUnavailableException("request", exception);
+        }
+        catch (OperationCanceledException exception)
+            when (!callerCancellationToken.IsCancellationRequested)
+        {
+            throw CreateTimeoutException("request", exception);
+        }
+        catch (OperationCanceledException exception)
+            when (callerCancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                exception.Message,
+                exception,
+                callerCancellationToken);
         }
         catch (HttpRequestException exception)
         {
             throw CreateUnavailableException("request", exception);
+        }
+    }
+
+    private async Task<T> ExecuteWithStreamingIdleTimeoutAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        using var idleCancellation = new CancellationTokenSource();
+        using var readCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            idleCancellation.Token);
+        using ITimer timer = _timeProvider.CreateTimer(
+            static state =>
+            {
+                try
+                {
+                    ((CancellationTokenSource)state!).Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            },
+            idleCancellation,
+            _streamingIdleTimeout,
+            Timeout.InfiniteTimeSpan);
+
+        try
+        {
+            return await operation(readCancellation.Token);
+        }
+        catch (OperationCanceledException exception)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                exception.Message,
+                exception,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+            when (idleCancellation.IsCancellationRequested)
+        {
+            throw CreateTimeoutException("streaming response", exception);
         }
     }
 
@@ -278,7 +367,7 @@ public class OllamaTextGenerationService : ITextGenerationService
 
     private static OllamaProviderException CreateTimeoutException(
         string operation,
-        OperationCanceledException exception)
+        Exception exception)
     {
         return new OllamaProviderException(
             OllamaFailureKind.Timeout,

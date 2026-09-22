@@ -20,6 +20,8 @@ namespace SemanticRagSearch.Api.Domain
 
         public string? ApiKey { get; set; }
 
+        public string? ApiKeyHash { get; set; }
+
         public DateTime CreatedDate { get; set; } = DateTime.UtcNow;
 
         public DateTime LastModifiedDate { get; set; } = DateTime.UtcNow;

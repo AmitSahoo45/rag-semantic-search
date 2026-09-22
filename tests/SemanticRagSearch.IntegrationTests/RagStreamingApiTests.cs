@@ -314,14 +314,23 @@ public class RagStreamingApiTests
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseSetting("App:RateLimiting:Enabled", "false");
+            builder.UseSetting("OpenTelemetry:ExportEnabled", "false");
             builder.ConfigureLogging(logging => logging.ClearProviders());
             builder.ConfigureTestServices(services =>
             {
+                services.AddContractTenantStore();
                 services.RemoveAll<ISemanticSearchService>();
                 services.RemoveAll<ITextGenerationService>();
                 services.AddSingleton(searchService);
                 services.AddSingleton(generationService);
             });
+        }
+
+        protected override void ConfigureClient(HttpClient client)
+        {
+            base.ConfigureClient(client);
+            client.DefaultRequestHeaders.Add("X-API-Key", TenantApiTestExtensions.KeyFor(TenantApiTestExtensions.ContractTenantId));
         }
     }
 
