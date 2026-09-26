@@ -1,4 +1,3 @@
-using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -62,7 +61,25 @@ public static class ObservabilityServiceCollectionExtensions
                     "OpenTelemetry:OtlpEndpoint must be an absolute URI.");
             }
 
-            openTelemetry.UseOtlpExporter(OtlpExportProtocol.HttpProtobuf, endpoint);
+            // Export only bounded traces and metrics. Application logs can contain
+            // tenant identifiers and exception details and must stay with local providers.
+            openTelemetry
+                .WithTracing(tracing => tracing.AddOtlpExporter("tracing", options =>
+                {
+                    options.Protocol = OtlpExportProtocol.HttpProtobuf;
+                    options.Endpoint = new UriBuilder(endpoint)
+                    {
+                        Path = $"{endpoint.AbsolutePath.TrimEnd('/')}/v1/traces"
+                    }.Uri;
+                }))
+                .WithMetrics(metrics => metrics.AddOtlpExporter("metrics", options =>
+                {
+                    options.Protocol = OtlpExportProtocol.HttpProtobuf;
+                    options.Endpoint = new UriBuilder(endpoint)
+                    {
+                        Path = $"{endpoint.AbsolutePath.TrimEnd('/')}/v1/metrics"
+                    }.Uri;
+                }));
         }
 
         return services;
