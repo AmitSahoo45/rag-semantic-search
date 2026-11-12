@@ -16,6 +16,7 @@ public class SemanticSearchService : ISemanticSearchService
     private readonly AppDbContext _dbContext;
     private readonly IEmbeddingService _embeddingService;
     private readonly IVectorStoreService _vectorStoreService;
+    private readonly IFullTextSearchService _fullTextSearchService;
     private readonly SearchSettings _settings;
     private readonly ILogger<SemanticSearchService> _logger;
 
@@ -24,11 +25,13 @@ public class SemanticSearchService : ISemanticSearchService
         IEmbeddingService embeddingService,
         IVectorStoreService vectorStoreService,
         IOptions<SearchSettings> settings,
-        ILogger<SemanticSearchService> logger)
+        ILogger<SemanticSearchService> logger,
+        IFullTextSearchService fullTextSearchService)
     {
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
         _embeddingService = embeddingService ?? throw new ArgumentNullException(nameof(embeddingService));
         _vectorStoreService = vectorStoreService ?? throw new ArgumentNullException(nameof(vectorStoreService));
+        _fullTextSearchService = fullTextSearchService ?? throw new ArgumentNullException(nameof(fullTextSearchService));
         _settings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
@@ -43,6 +46,7 @@ public class SemanticSearchService : ISemanticSearchService
 
         int topK = ResolveTopK(request.TopK);
         double minSimilarity = ResolveMinSimilarity(request.MinSimilarity);
+        string retrievalMode = ResolveRetrievalMode(request.RetrievalMode);
         string normalizedQuery = request.Query.Trim();
 
         bool tenantExists = await _dbContext.Tenants
@@ -53,21 +57,33 @@ public class SemanticSearchService : ISemanticSearchService
 
         float[] queryEmbedding = await _embeddingService.EmbedAsync(normalizedQuery, cancellationToken);
 
+        var queryVector = new Vector(queryEmbedding);
         IReadOnlyList<SimilarityResult> similarityResults = await _vectorStoreService.SearchSimilarAsync(
             request.TenantId,
-            new Vector(queryEmbedding),
-            topK,
+            queryVector,
+            retrievalMode == "hybrid" ? _settings.CandidateLimit : topK,
             minSimilarity,
             cancellationToken);
+
+        IReadOnlyList<RankedSearchResult>? rankedResults = null;
+        if (retrievalMode == "hybrid")
+        {
+            IReadOnlyList<SimilarityResult> lexicalResults = await _fullTextSearchService.SearchAsync(
+                request.TenantId, normalizedQuery, queryVector, _settings.CandidateLimit,
+                minSimilarity, cancellationToken);
+            rankedResults = ReciprocalRankFusion.Fuse(similarityResults, lexicalResults, topK, _settings.RrfConstant);
+            similarityResults = rankedResults.Select(result => result.Result).ToArray();
+        }
 
         Dictionary<Guid, DocumentSummary> documentsById = await LoadDocumentSummariesAsync(
             request.TenantId,
             similarityResults.Select(r => r.Chunk.DocumentId).Distinct().ToArray(),
             cancellationToken);
 
-        IReadOnlyList<SemanticSearchMatch> matches = similarityResults
-            .Select(result => CreateMatch(result, documentsById))
-            .ToArray();
+        IReadOnlyList<SemanticSearchMatch> matches = rankedResults is null
+            ? similarityResults.Select(result => CreateMatch(result, documentsById)).ToArray()
+            : rankedResults.Select(result => CreateMatch(result.Result, documentsById)
+                with { RankingScore = result.RankingScore }).ToArray();
 
         _logger.LogInformation(
             "Semantic search returned {MatchCount} match(es) for tenant {TenantId}.",
@@ -79,7 +95,8 @@ public class SemanticSearchService : ISemanticSearchService
             normalizedQuery,
             topK,
             minSimilarity,
-            matches);
+            matches,
+            retrievalMode);
     }
 
     private async Task<Dictionary<Guid, DocumentSummary>> LoadDocumentSummariesAsync(
@@ -132,7 +149,7 @@ public class SemanticSearchService : ISemanticSearchService
     {
         double minSimilarity = requestedMinSimilarity ?? _settings.MinSimilarity;
 
-        if (minSimilarity < 0 || minSimilarity > 1)
+        if (!double.IsFinite(minSimilarity) || minSimilarity < 0 || minSimilarity > 1)
             throw new ArgumentOutOfRangeException(nameof(requestedMinSimilarity), "MinSimilarity must be between 0 and 1.");
 
         return minSimilarity;
@@ -149,8 +166,19 @@ public class SemanticSearchService : ISemanticSearchService
         if (string.IsNullOrWhiteSpace(request.Query))
             throw new ArgumentException("Query cannot be empty.", nameof(request));
 
+        if (request.Query.Contains('\0'))
+            throw new ArgumentException("Query cannot contain NUL characters.", nameof(request));
+
         if (request.Query.Trim().Length > MaxQueryLength)
             throw new ArgumentException($"Query cannot exceed {MaxQueryLength} characters.", nameof(request));
+    }
+
+    private string ResolveRetrievalMode(string? requestedMode)
+    {
+        string mode = requestedMode ?? _settings.RetrievalMode;
+        if (mode is not ("vector" or "hybrid"))
+            throw new ArgumentException("RetrievalMode must be 'vector' or 'hybrid'.", nameof(requestedMode));
+        return mode;
     }
 
     private static void ValidateSettings(SearchSettings settings)
@@ -164,8 +192,15 @@ public class SemanticSearchService : ISemanticSearchService
         if (settings.DefaultTopK > settings.MaxTopK)
             throw new InvalidOperationException("DefaultTopK cannot be greater than MaxTopK.");
 
-        if (settings.MinSimilarity < 0 || settings.MinSimilarity > 1)
+        if (!double.IsFinite(settings.MinSimilarity) || settings.MinSimilarity < 0 || settings.MinSimilarity > 1)
             throw new InvalidOperationException("MinSimilarity must be between 0 and 1.");
+
+        if (settings.RetrievalMode is not ("vector" or "hybrid"))
+            throw new InvalidOperationException("RetrievalMode must be 'vector' or 'hybrid'.");
+        if (settings.CandidateLimit < settings.MaxTopK || settings.CandidateLimit > 200)
+            throw new InvalidOperationException("CandidateLimit must be at least MaxTopK and at most 200.");
+        if (settings.RrfConstant <= 0)
+            throw new InvalidOperationException("RrfConstant must be greater than zero.");
     }
 
     private sealed record DocumentSummary(Guid DocumentId, string Title, string? SourceUrl);

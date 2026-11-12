@@ -55,10 +55,13 @@ public static class ObservabilityServiceCollectionExtensions
         {
             string endpointValue =
                 configuration["OpenTelemetry:OtlpEndpoint"] ?? DefaultOtlpEndpoint;
-            if (!Uri.TryCreate(endpointValue, UriKind.Absolute, out Uri? endpoint))
+            // Uri.TryCreate accepts scheme-less values such as "localhost:4318" (parsed as
+            // scheme "localhost"), which the OTLP exporter then fails on silently per batch.
+            if (!Uri.TryCreate(endpointValue, UriKind.Absolute, out Uri? endpoint) ||
+                !IsHttpOrHttps(endpoint))
             {
                 throw new InvalidOperationException(
-                    "OpenTelemetry:OtlpEndpoint must be an absolute URI.");
+                    "OpenTelemetry:OtlpEndpoint must be an absolute http or https URI.");
             }
 
             // Export only bounded traces and metrics. Application logs can contain
@@ -84,4 +87,8 @@ public static class ObservabilityServiceCollectionExtensions
 
         return services;
     }
+
+    private static bool IsHttpOrHttps(Uri endpoint) =>
+        string.Equals(endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
 }

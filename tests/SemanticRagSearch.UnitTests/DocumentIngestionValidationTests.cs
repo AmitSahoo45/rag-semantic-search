@@ -40,6 +40,39 @@ public class DocumentIngestionValidationTests
     }
 
     [Theory]
+    [InlineData("content-too-long", "Content cannot exceed 500,000 characters.")]
+    [InlineData("title-nul", "Title cannot contain NUL characters.")]
+    [InlineData("source-url-nul", "SourceUrl cannot contain NUL characters.")]
+    [InlineData("content-nul", "Content cannot contain NUL characters.")]
+    public async Task OversizedOrNulInput_IsRejectedWithDescriptiveMessage(
+        string invalidField,
+        string expectedMessage)
+    {
+        // Requests are built here rather than via MemberData so the 500k-char content stays out of test display names.
+        var valid = new DocumentIngestionRequest(Guid.NewGuid(), "Title", null, "Content");
+        DocumentIngestionRequest request = invalidField switch
+        {
+            "content-too-long" => valid with { Content = new string('x', 500_001) },
+            "title-nul" => valid with { Title = "Ti\0tle" },
+            "source-url-nul" => valid with { SourceUrl = "https://example.test/\0" },
+            "content-nul" => valid with { Content = "Con\0tent" },
+            _ => throw new ArgumentOutOfRangeException(nameof(invalidField), invalidField, "Unknown test case.")
+        };
+        await using var context = CreateContext();
+        var chunker = new Mock<IChunkingService>(MockBehavior.Strict);
+        var embedder = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        var service = new DocumentIngestionService(context, chunker.Object, embedder.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(() => service.IngestAsync(request));
+
+        Assert.StartsWith(expectedMessage, exception.Message);
+        chunker.VerifyNoOtherCalls();
+        embedder.VerifyNoOtherCalls();
+        Assert.Empty(context.ChangeTracker.Entries());
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task MissingOrInactiveTenant_IsRejectedBeforeProviderWork(bool exists)

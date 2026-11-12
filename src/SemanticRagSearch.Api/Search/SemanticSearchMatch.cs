@@ -7,4 +7,5 @@ public sealed record SemanticSearchMatch(
     string? SourceUrl,
     int ChunkIndex,
     string TextContent,
-    double Score);
+    double Score,
+    double? RankingScore = null);

@@ -64,6 +64,41 @@ public class RagStreamingApiTests
     }
 
     [Fact]
+    public async Task UnbindableRequestBody_ReturnsJsonProblemDetailsBadRequest()
+    {
+        var search = new ControlledSearchService(
+            (_, _) => throw new InvalidOperationException("Search must not run."));
+        using var factory = new StreamingApiFactory(
+            search,
+            new ControlledGenerationService(EmptyStream));
+        using HttpClient client = factory.CreateClient();
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/api/v1/ask/stream")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(
+                    new { tenantId = TenantId, question = "q", topK = "five" }),
+                Encoding.UTF8,
+                "application/json")
+        };
+
+        using HttpResponseMessage response = await client.SendAsync(
+            message,
+            HttpCompletionOption.ResponseHeadersRead);
+        string body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.StartsWith(
+            "application/problem+json",
+            response.Content.Headers.ContentType?.ToString());
+        Assert.NotEmpty(body);
+        using JsonDocument problem = JsonDocument.Parse(body);
+        Assert.Equal(400, problem.RootElement.GetProperty("status").GetInt32());
+        Assert.NotEmpty(problem.RootElement.GetProperty("errors").EnumerateObject());
+        Assert.Contains("topK", body);
+        Assert.Equal(0, search.CallCount);
+    }
+
+    [Fact]
     public async Task MissingTenant_FromRealRagService_ReturnsJsonNotFound()
     {
         var search = new ControlledSearchService(

@@ -25,6 +25,11 @@ internal static class ApiErrorMapping
             OllamaProviderException => new ApiError(
                 StatusCodes.Status502BadGateway,
                 "The AI provider returned an invalid response."),
+            BadHttpRequestException badRequest => new ApiError(
+                badRequest.StatusCode,
+                badRequest.StatusCode == StatusCodes.Status413PayloadTooLarge
+                    ? "Request body is too large."
+                    : "The request could not be processed."),
             _ => new ApiError(
                 StatusCodes.Status500InternalServerError,
                 "An unexpected server error occurred.")
@@ -43,6 +48,17 @@ internal static class ApiErrorMapping
                 "Ollama provider failure {FailureKind} with upstream status {UpstreamStatusCode}.",
                 providerException.FailureKind,
                 providerException.UpstreamStatusCode);
+            return;
+        }
+
+        if (exception is BadHttpRequestException badRequest)
+        {
+            logger.LogWarning(
+                badRequest,
+                "Rejected request {RequestMethod} {RequestPath} with status {StatusCode}.",
+                httpContext.Request.Method,
+                httpContext.Request.Path,
+                badRequest.StatusCode);
             return;
         }
 

@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -498,6 +499,98 @@ public class DocumentIngestionServiceTests
         Assert.Equal(cancellation.Token, dbContext.LastSaveCancellationToken);
         Assert.Single(await dbContext.Documents.ToListAsync());
         Assert.Single(await dbContext.Chunks.ToListAsync());
+    }
+
+    [Fact]
+    public async Task IngestAsync_EmbedsChunksInBatchesOfAtMostThirtyTwoInChunkOrder()
+    {
+        const int chunkCount = 40;
+        const int embeddingBatchSize = 32;
+        await using InMemoryAppDbContext dbContext = CreateDbContext();
+        Guid tenantId = Guid.NewGuid();
+        using var cancellation = new CancellationTokenSource();
+        var recordedBatches = new List<IReadOnlyList<string>>();
+        List<Chunk> producedChunks = [];
+
+        dbContext.Tenants.Add(new Tenant
+        {
+            TenantId = tenantId,
+            TenantName = "Test tenant",
+            TenantDescription = "Tenant for embedding batch tests",
+            Email = "embedding-batches@example.test"
+        });
+        await dbContext.SaveChangesAsync();
+        dbContext.ChangeTracker.Clear();
+        dbContext.ResetSaveTracking();
+
+        var chunkingService = new Mock<IChunkingService>(MockBehavior.Strict);
+        chunkingService
+            .Setup(service => service.ChunkDocument(
+                It.IsAny<Document>(),
+                It.IsAny<string>()))
+            .Returns((Document document, string _) =>
+            {
+                producedChunks.AddRange(Enumerable.Range(0, chunkCount)
+                    .Select(index => new Chunk
+                    {
+                        DocumentId = document.DocumentId,
+                        TenantId = document.TenantId,
+                        ChunkIndex = index,
+                        TextContent = $"chunk-{index}",
+                        TokenCount = 1
+                    }));
+
+                return producedChunks;
+            });
+        var embeddingService = new Mock<IEmbeddingService>(MockBehavior.Strict);
+        embeddingService
+            .Setup(service => service.EmbedBatchAsync(
+                It.IsAny<IReadOnlyList<string>>(),
+                It.Is<CancellationToken>(token => token == cancellation.Token)))
+            .Returns<IReadOnlyList<string>, CancellationToken>((texts, _) =>
+            {
+                recordedBatches.Add(texts.ToList());
+
+                // Encode the chunk index in the embedding so chunk-order assignment can be verified.
+                IReadOnlyList<float[]> embeddings = texts
+                    .Select(text => new[] { (float)int.Parse(text["chunk-".Length..], CultureInfo.InvariantCulture) })
+                    .ToList();
+
+                return Task.FromResult(embeddings);
+            });
+        var service = new DocumentIngestionService(
+            dbContext,
+            chunkingService.Object,
+            embeddingService.Object,
+            NullLogger<DocumentIngestionService>.Instance);
+
+        DocumentIngestionResult result = await service.IngestAsync(
+            new DocumentIngestionRequest(
+                tenantId,
+                "Batched document",
+                null,
+                "content that splits into many chunks"),
+            cancellation.Token);
+
+        Assert.False(result.WasDuplicate);
+        Assert.Equal(chunkCount, result.ChunkCount);
+        Assert.Equal(2, recordedBatches.Count);
+        Assert.Equal(embeddingBatchSize, recordedBatches[0].Count);
+        Assert.Equal(chunkCount - embeddingBatchSize, recordedBatches[1].Count);
+        Assert.All(recordedBatches, batch => Assert.True(batch.Count <= embeddingBatchSize));
+        Assert.Equal(
+            Enumerable.Range(0, chunkCount).Select(index => $"chunk-{index}"),
+            recordedBatches.SelectMany(batch => batch));
+        Assert.Equal(chunkCount, producedChunks.Count);
+        for (int index = 0; index < chunkCount; index++)
+        {
+            Assert.Equal(index, producedChunks[index].ChunkIndex);
+            Assert.Equal((float)index, Assert.Single(producedChunks[index].Embedding.ToArray()));
+        }
+        Assert.Equal(1, dbContext.SaveChangesCallCount);
+        Assert.Equal(1, dbContext.AddedDocumentCountAtLastSave);
+        Assert.Equal(chunkCount, dbContext.AddedChunkCountAtLastSave);
+        Assert.Equal(chunkCount, await dbContext.Chunks.CountAsync());
     }
 
     [Fact]

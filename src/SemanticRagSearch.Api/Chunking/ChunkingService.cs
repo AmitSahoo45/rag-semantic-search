@@ -139,10 +139,13 @@ public class ChunkingService : IChunkingService
                     currentLength = 0;
                 }
 
-                for (int start = 0; start < word.Length; start += maxCharacters)
+                int start = 0;
+
+                while (start < word.Length)
                 {
-                    int length = Math.Min(maxCharacters, word.Length - start);
-                    yield return new TextUnit(word.Substring(start, length), "hard_split");
+                    int end = FindSafeSliceEnd(word, start, maxCharacters);
+                    yield return new TextUnit(word.Substring(start, end - start), "hard_split");
+                    start = end;
                 }
 
                 continue;
@@ -259,6 +262,21 @@ public class ChunkingService : IChunkingService
     private int MaxCharactersPerChunk()
     {
         return _settings.ChunkSize * 4;
+    }
+
+    private static int FindSafeSliceEnd(string text, int start, int maxLength)
+    {
+        int end = Math.Min(start + maxLength, text.Length);
+
+        // Never cut between a high and a low surrogate: both halves would be invalid UTF-16.
+        if (end > start && end < text.Length && char.IsSurrogatePair(text[end - 1], text[end]))
+            end--;
+
+        // Always make progress: a slice holds at least one complete code point.
+        if (end <= start)
+            end = Math.Min(start + (char.IsHighSurrogate(text[start]) ? 2 : 1), text.Length);
+
+        return end;
     }
 
     private static string NormalizeNewlines(string text)

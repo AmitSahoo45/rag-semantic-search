@@ -12,6 +12,11 @@ namespace SemanticRagSearch.UnitTests.Observability;
 
 public sealed class TelemetryDecoratorTests
 {
+    // The decorators time first-token latency with a real Stopwatch, so the delay before the
+    // first non-empty fragment is a real wait and the assertion leaves headroom for timer granularity.
+    private const int FirstTextDelayMilliseconds = 100;
+    private const double MinimumFirstTokenMilliseconds = 50;
+
     [Fact]
     public async Task EmbeddingSuccess_RecordsLatencyAndCallWithoutInputContent()
     {
@@ -86,19 +91,29 @@ public sealed class TelemetryDecoratorTests
         const string secretPrompt = "secret prompt 3dd5";
         using var telemetry = new TelemetryCapture();
         var service = new ObservableTextGenerationService(
-            new StubGenerationService(stream: (_, _, token) => Fragments(token)));
+            new StubGenerationService(stream: (_, _, token) => DelayedFragments(token)));
 
         var fragments = new List<string>();
+        int firstTokenMeasurementsAtEmptyFragment = -1;
         await foreach (string fragment in service.GenerateStreamAsync("system", secretPrompt))
+        {
+            if (fragment.Length == 0)
+            {
+                firstTokenMeasurementsAtEmptyFragment =
+                    telemetry.FirstTokenMeasurements("generation.stream").Count;
+            }
+
             fragments.Add(fragment);
+        }
 
         Assert.Equal(["", "first private fragment", "second private fragment"], fragments);
+        Assert.Equal(0, firstTokenMeasurementsAtEmptyFragment);
         telemetry.AssertCompletedOperation("generation.stream", "success");
-        MeasurementRecord firstToken = Assert.Single(
-            telemetry.Measurements,
-            measurement => measurement.InstrumentName == "rag.stream.first_token.duration" &&
-                measurement.Tag("rag.operation") == "generation.stream");
-        Assert.True(firstToken.Value >= 0);
+        MeasurementRecord firstToken = Assert.Single(telemetry.FirstTokenMeasurements("generation.stream"));
+        Assert.True(
+            firstToken.Value >= MinimumFirstTokenMilliseconds,
+            $"Expected first-token latency to include the {FirstTextDelayMilliseconds} ms delay " +
+            $"before the first non-empty fragment, but {firstToken.Value} ms was recorded.");
         Assert.DoesNotContain(secretPrompt, telemetry.AllExportedText(), StringComparison.Ordinal);
     }
 
@@ -177,21 +192,31 @@ public sealed class TelemetryDecoratorTests
         using var telemetry = new TelemetryCapture();
         var service = new ObservableRagService(
             new StubRagService(
-                stream: token => RagEvents(token)));
+                stream: token => DelayedRagEvents(token)));
 
         var events = new List<RagStreamEvent>();
+        int firstTokenMeasurementsAtEmptyEvent = -1;
         await foreach (RagStreamEvent item in service.AskStreamAsync(
             new RagRequest(tenantId, "private question", 3, 0.4)))
         {
+            if (events.Count == 0)
+            {
+                firstTokenMeasurementsAtEmptyEvent =
+                    telemetry.FirstTokenMeasurements("rag.stream").Count;
+            }
+
             events.Add(item);
         }
 
         Assert.Equal(3, events.Count);
+        Assert.Null(events[0].Text);
+        Assert.Equal(0, firstTokenMeasurementsAtEmptyEvent);
         telemetry.AssertCompletedOperation("rag.stream", "success");
-        Assert.Single(
-            telemetry.Measurements,
-            measurement => measurement.InstrumentName == "rag.stream.first_token.duration" &&
-                measurement.Tag("rag.operation") == "rag.stream");
+        MeasurementRecord firstToken = Assert.Single(telemetry.FirstTokenMeasurements("rag.stream"));
+        Assert.True(
+            firstToken.Value >= MinimumFirstTokenMilliseconds,
+            $"Expected first-token latency to include the {FirstTextDelayMilliseconds} ms delay " +
+            $"before the first event with text, but {firstToken.Value} ms was recorded.");
     }
 
     [Fact]
@@ -252,6 +277,26 @@ public sealed class TelemetryDecoratorTests
         cancellationToken.ThrowIfCancellationRequested();
         yield return new RagStreamEvent(null, false, null, null);
         await Task.Yield();
+        yield return new RagStreamEvent("private answer fragment", false, null, null);
+        yield return new RagStreamEvent(null, true, [], new RagExecutionMetadata(1, 2, 1));
+    }
+
+    private static async IAsyncEnumerable<string> DelayedFragments(
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return "";
+        await Task.Delay(FirstTextDelayMilliseconds, cancellationToken);
+        yield return "first private fragment";
+        yield return "second private fragment";
+    }
+
+    private static async IAsyncEnumerable<RagStreamEvent> DelayedRagEvents(
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return new RagStreamEvent(null, false, null, null);
+        await Task.Delay(FirstTextDelayMilliseconds, cancellationToken);
         yield return new RagStreamEvent("private answer fragment", false, null, null);
         yield return new RagStreamEvent(null, true, [], new RagExecutionMetadata(1, 2, 1));
     }
@@ -412,6 +457,13 @@ public sealed class TelemetryDecoratorTests
                     measurement.Tag("rag.operation") == operation &&
                     measurement.Tag("rag.outcome") == outcome));
         }
+
+        public IReadOnlyList<MeasurementRecord> FirstTokenMeasurements(string operation) =>
+            Measurements
+                .Where(measurement =>
+                    measurement.InstrumentName == "rag.stream.first_token.duration" &&
+                    measurement.Tag("rag.operation") == operation)
+                .ToList();
 
         public string AllExportedText()
         {

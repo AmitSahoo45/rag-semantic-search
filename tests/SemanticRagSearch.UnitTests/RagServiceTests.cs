@@ -13,6 +13,52 @@ public class RagServiceTests
     private static readonly Guid TenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Ask_MetadataExposesResolvedRetrievalMode(bool streaming, bool hasSources)
+    {
+        var search = new Mock<ISemanticSearchService>();
+        search.Setup(service => service.SearchAsync(It.IsAny<SemanticSearchRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SemanticSearchResponse(TenantId, "question", 2, 0.5,
+                hasSources ? [new SemanticSearchMatch(Guid.NewGuid(), Guid.NewGuid(), "Source", null, 0, "evidence", 0.8)] : [],
+                "hybrid"));
+        var generation = new Mock<ITextGenerationService>(MockBehavior.Strict);
+        generation.Setup(service => service.GenerateAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("answer");
+        generation.Setup(service => service.GenerateStreamAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(StreamFragments("answer"));
+        RagService service = CreateService(search.Object, generation.Object);
+        var request = new RagRequest(TenantId, "question", 2, 0.5);
+
+        RagExecutionMetadata metadata = streaming
+            ? Assert.IsType<RagExecutionMetadata>((await CollectAsync(service.AskStreamAsync(request)))[^1].Metadata)
+            : (await service.AskAsync(request)).Metadata;
+
+        Assert.Equal("hybrid", metadata.RetrievalMode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Ask_ForwardsRetrievalModeToSearch(bool streaming)
+    {
+        var search = new Mock<ISemanticSearchService>(MockBehavior.Strict);
+        search.Setup(service => service.SearchAsync(
+                It.Is<SemanticSearchRequest>(request => request.RetrievalMode == "hybrid"),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SemanticSearchResponse(TenantId, "question", 2, 0.5, [], "hybrid"));
+        RagService service = CreateService(search.Object, Mock.Of<ITextGenerationService>(MockBehavior.Strict));
+        var request = new RagRequest(TenantId, "question", 2, 0.5, "hybrid");
+
+        if (streaming) await CollectAsync(service.AskStreamAsync(request));
+        else await service.AskAsync(request);
+
+        search.VerifyAll();
+    }
+
+    [Theory]
     [InlineData(0, 1, "MaxModelContextTokens")]
     [InlineData(128, 0, "ReservedResponseTokens")]
     [InlineData(128, 128, "ReservedResponseTokens")]

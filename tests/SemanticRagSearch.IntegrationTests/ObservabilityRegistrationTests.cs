@@ -33,4 +33,47 @@ public sealed class ObservabilityRegistrationTests
 
         Assert.IsType<ObservableEmbeddingService>(service);
     }
+
+    [Theory]
+    [InlineData("localhost:4318")]
+    [InlineData("ftp://localhost:4318")]
+    [InlineData("not an absolute uri")]
+    public void AddRagObservability_WithNonHttpOtlpEndpoint_ThrowsInvalidOperation(string endpoint)
+    {
+        IConfiguration configuration = BuildExportConfiguration(endpoint);
+        var services = new ServiceCollection();
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+        {
+            services.AddRagObservability(configuration);
+        });
+
+        Assert.Contains("OpenTelemetry:OtlpEndpoint", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("http://localhost:4318")]
+    [InlineData("HTTPS://collector.invalid:4318/otel")]
+    public void AddRagObservability_WithHttpOtlpEndpoint_AcceptsSchemeCaseInsensitively(string endpoint)
+    {
+        IConfiguration configuration = BuildExportConfiguration(endpoint);
+        var services = new ServiceCollection();
+
+        Exception? exception = Record.Exception(() =>
+        {
+            services.AddRagObservability(configuration);
+        });
+
+        Assert.Null(exception);
+    }
+
+    private static IConfiguration BuildExportConfiguration(string endpoint) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenTelemetry:ExportEnabled"] = "true",
+                ["OpenTelemetry:OtlpEndpoint"] = endpoint,
+                ["OpenTelemetry:ServiceName"] = "RegistrationTest"
+            })
+            .Build();
 }

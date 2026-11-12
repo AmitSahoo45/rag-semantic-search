@@ -11,14 +11,10 @@ public class ApproximateTextTokenEstimatorTests
     [InlineData("a", 1)]
     [InlineData("abcd", 1)]
     [InlineData("abcde", 2)]
-    public void EstimateTokens_RoundsUpUsingConfiguredRatio(
-        string text,
-        int expectedTokens)
+    public void EstimateTokens_RoundsUpUsingConfiguredRatio(string text,int expectedTokens)
     {
         ApproximateTextTokenEstimator estimator = CreateEstimator(4.0);
-
         int tokenCount = estimator.EstimateTokens(text);
-
         Assert.Equal(expectedTokens, tokenCount);
     }
 
@@ -29,9 +25,7 @@ public class ApproximateTextTokenEstimatorTests
     [InlineData(double.PositiveInfinity)]
     public void Constructor_RejectsInvalidCharactersPerToken(double value)
     {
-        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-            () => CreateEstimator(value));
-
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => CreateEstimator(value));
         Assert.Contains("EstimatedCharactersPerToken", exception.Message);
     }
 

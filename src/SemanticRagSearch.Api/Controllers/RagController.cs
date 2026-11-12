@@ -38,8 +38,9 @@ public class RagController : ControllerBase
     }
 
     [HttpPost("stream")]
-    [Produces("text/event-stream")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    // No [Produces]: it is a result filter that would retarget the automatic
+    // 400/415 ProblemDetails to text/event-stream and turn them into empty 406s.
+    [ProducesResponseType(typeof(void), StatusCodes.Status200OK, "text/event-stream")]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public IResult AskStream(
         [FromBody] RagRequest? request,

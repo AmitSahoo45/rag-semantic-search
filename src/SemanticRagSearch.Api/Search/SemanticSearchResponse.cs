@@ -5,4 +5,5 @@ public sealed record SemanticSearchResponse(
     string Query,
     int TopK,
     double MinSimilarity,
-    IReadOnlyList<SemanticSearchMatch> Matches);
+    IReadOnlyList<SemanticSearchMatch> Matches,
+    string RetrievalMode = "vector");

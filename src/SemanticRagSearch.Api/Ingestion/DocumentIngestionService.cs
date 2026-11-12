@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +15,8 @@ public class DocumentIngestionService : IDocumentIngestionService
 {
     private const int MaxTitleLength = 300;
     private const int MaxSourceUrlLength = 2048;
+    private const int MaxContentLength = 500_000;
+    private const int EmbeddingBatchSize = 32;
     private const string DocumentContentHashConstraint = "IX_documents_tenant_id_content_hash";
     private const string ChunkIndexConstraint = "IX_chunks_document_id_chunk_index";
 
@@ -98,7 +101,7 @@ public class DocumentIngestionService : IDocumentIngestionService
         if (chunks.Count == 0)
             throw new InvalidOperationException("Chunking produced no chunks for the document.");
 
-        IReadOnlyList<float[]> embeddings = await _embeddingService.EmbedBatchAsync(
+        IReadOnlyList<float[]> embeddings = await EmbedInBatchesAsync(
             chunks.Select(c => c.TextContent).ToArray(),
             cancellationToken);
 
@@ -168,11 +171,46 @@ public class DocumentIngestionService : IDocumentIngestionService
         if (request.Title.Trim().Length > MaxTitleLength)
             throw new ArgumentException($"Title cannot exceed {MaxTitleLength} characters.", nameof(request));
 
+        // char.IsWhiteSpace('\0') is false, so Trim never strips NUL and PostgreSQL rejects it (22021).
+        if (request.Title.Contains('\0'))
+            throw new ArgumentException("Title cannot contain NUL characters.", nameof(request));
+
         if (!string.IsNullOrWhiteSpace(request.SourceUrl) && request.SourceUrl.Trim().Length > MaxSourceUrlLength)
             throw new ArgumentException($"SourceUrl cannot exceed {MaxSourceUrlLength} characters.", nameof(request));
 
+        if (request.SourceUrl is not null && request.SourceUrl.Contains('\0'))
+            throw new ArgumentException("SourceUrl cannot contain NUL characters.", nameof(request));
+
         if (string.IsNullOrWhiteSpace(request.Content))
             throw new ArgumentException("Content cannot be empty.", nameof(request));
+
+        if (request.Content.Length > MaxContentLength)
+            throw new ArgumentException(
+                $"Content cannot exceed {MaxContentLength.ToString("N0", CultureInfo.InvariantCulture)} characters.",
+                nameof(request));
+
+        if (request.Content.Contains('\0'))
+            throw new ArgumentException("Content cannot contain NUL characters.", nameof(request));
+    }
+
+    private async Task<IReadOnlyList<float[]>> EmbedInBatchesAsync(
+        string[] texts,
+        CancellationToken cancellationToken)
+    {
+        // Embed in bounded slices so a large document cannot turn into a single oversized provider call.
+        var embeddings = new List<float[]>(texts.Length);
+
+        for (int offset = 0; offset < texts.Length; offset += EmbeddingBatchSize)
+        {
+            int length = Math.Min(EmbeddingBatchSize, texts.Length - offset);
+            string[] batch = new string[length];
+            Array.Copy(texts, offset, batch, 0, length);
+
+            IReadOnlyList<float[]> batchEmbeddings = await _embeddingService.EmbedBatchAsync(batch, cancellationToken);
+            embeddings.AddRange(batchEmbeddings);
+        }
+
+        return embeddings;
     }
 
     private static string? NormalizeOptionalValue(string? value)

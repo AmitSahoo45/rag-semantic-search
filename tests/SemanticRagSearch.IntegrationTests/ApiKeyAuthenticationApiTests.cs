@@ -76,9 +76,18 @@ public class ApiKeyAuthenticationApiTests
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
     }
 
+    [Fact]
+    public async Task AnonymousEndpoint_WithApiKey_DoesNotQueryTenantStore()
+    {
+        using var factory = new AuthApiFactory(new ThrowingTenantStore());
+        using HttpClient client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add(ApiKeyCredentials.HeaderName, TenantApiTestExtensions.KeyFor(TenantApiTestExtensions.ContractTenantId));
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
+    }
+
     private static object Body(Guid tenantId) => new { tenantId, title = "Title", content = "Content", query = "Question", question = "Question" };
 
-    private sealed class AuthApiFactory : WebApplicationFactory<Program>
+    private sealed class AuthApiFactory(IApiKeyTenantStore? tenantStore = null) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -88,10 +97,21 @@ public class ApiKeyAuthenticationApiTests
             builder.ConfigureTestServices(services =>
             {
                 services.AddContractTenantStore();
+                if (tenantStore is not null)
+                {
+                    services.RemoveAll<IApiKeyTenantStore>();
+                    services.AddSingleton<IApiKeyTenantStore>(tenantStore);
+                }
                 services.RemoveAll<IRagService>();
                 services.AddSingleton<IRagService, SuccessfulRagService>();
             });
         }
+    }
+
+    private sealed class ThrowingTenantStore : IApiKeyTenantStore
+    {
+        public Task<Guid?> FindActiveTenantAsync(string keyHash, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The tenant store must not be queried for anonymous endpoints.");
     }
 
     private sealed class SuccessfulRagService : IRagService

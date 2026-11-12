@@ -52,7 +52,7 @@ public class RagService : IRagService
                 preparation.MinSimilarity,
                 NoAnswerMessage,
                 preparation.Sources,
-                new RagExecutionMetadata(preparation.SearchLatencyMs, 0, null));
+                new RagExecutionMetadata(preparation.SearchLatencyMs, 0, null, preparation.RetrievalMode));
         }
 
         string systemPrompt = BuildSystemPrompt();
@@ -80,7 +80,8 @@ public class RagService : IRagService
             new RagExecutionMetadata(
                 preparation.SearchLatencyMs,
                 generationTimer.ElapsedMilliseconds,
-                null));
+                null,
+                preparation.RetrievalMode));
     }
 
     public async IAsyncEnumerable<RagStreamEvent> AskStreamAsync(
@@ -100,7 +101,7 @@ public class RagService : IRagService
                 null,
                 true,
                 preparation.Sources,
-                new RagExecutionMetadata(preparation.SearchLatencyMs, 0, null));
+                new RagExecutionMetadata(preparation.SearchLatencyMs, 0, null, preparation.RetrievalMode));
             yield break;
         }
 
@@ -136,7 +137,8 @@ public class RagService : IRagService
             new RagExecutionMetadata(
                 preparation.SearchLatencyMs,
                 generationTimer.ElapsedMilliseconds,
-                timeToFirstTextMs));
+                timeToFirstTextMs,
+                preparation.RetrievalMode));
     }
 
     private async Task<RagPreparation> PrepareAsync(
@@ -152,7 +154,8 @@ public class RagService : IRagService
                 request.TenantId,
                 normalizedQuestion,
                 request.TopK,
-                request.MinSimilarity),
+                request.MinSimilarity,
+                request.RetrievalMode),
             cancellationToken);
         searchTimer.Stop();
 
@@ -176,7 +179,8 @@ public class RagService : IRagService
             searchResponse.MinSimilarity,
             assembly.Context,
             assembly.Sources,
-            searchTimer.ElapsedMilliseconds);
+            searchTimer.ElapsedMilliseconds,
+            searchResponse.RetrievalMode);
     }
 
     private static string BuildSystemPrompt()
@@ -242,5 +246,6 @@ public class RagService : IRagService
         double MinSimilarity,
         string Context,
         IReadOnlyList<RagSource> Sources,
-        long SearchLatencyMs);
+        long SearchLatencyMs,
+        string RetrievalMode);
 }

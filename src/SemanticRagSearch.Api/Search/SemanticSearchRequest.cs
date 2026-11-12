@@ -4,4 +4,5 @@ public sealed record SemanticSearchRequest(
     Guid TenantId,
     string Query,
     int? TopK,
-    double? MinSimilarity) : Authentication.ITenantRequest;
+    double? MinSimilarity,
+    string? RetrievalMode = null) : Authentication.ITenantRequest;

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Options;
 using SemanticRagSearch.Api.Errors;
 
@@ -14,6 +15,9 @@ public sealed class ApiKeyAuthenticationHandler(
 {
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        if (Context.GetEndpoint()?.Metadata.GetMetadata<IAllowAnonymous>() is not null)
+            return AuthenticateResult.NoResult();
+
         if (!Request.Headers.TryGetValue(ApiKeyCredentials.HeaderName, out var values))
             return AuthenticateResult.NoResult();
 

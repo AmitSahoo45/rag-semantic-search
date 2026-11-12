@@ -132,7 +132,18 @@ public class PgVectorStoreService : IVectorStoreService
             """;
 
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection);
+        await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // The global HNSW index filters tenants after finding candidates. Continue
+        // scanning past other tenants, preserving distance order (pgvector >= 0.8.0).
+        // SET LOCAL keeps this tuning inside the search transaction and out of the pool.
+        await using (var settings = new NpgsqlCommand(
+            "SET LOCAL hnsw.iterative_scan = strict_order;", connection, transaction))
+        {
+            await settings.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("tenant_id", tenantId);
         command.Parameters.AddWithValue("query_embedding", queryEmbedding);
         command.Parameters.AddWithValue("min_similarity", minSimilarity);
@@ -140,15 +151,17 @@ public class PgVectorStoreService : IVectorStoreService
 
         var results = new List<SimilarityResult>();
 
-        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        while (await reader.ReadAsync(cancellationToken))
+        await using (NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            Chunk chunk = ReadChunk(reader);
-            double score = reader.GetDouble(9);
-            results.Add(new SimilarityResult(chunk, score));
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                Chunk chunk = ReadChunk(reader);
+                double score = reader.GetDouble(9);
+                results.Add(new SimilarityResult(chunk, score));
+            }
         }
 
+        await transaction.CommitAsync(cancellationToken);
         return results;
     }
 

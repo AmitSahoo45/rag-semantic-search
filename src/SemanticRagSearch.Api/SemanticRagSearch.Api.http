@@ -2,6 +2,9 @@
 # Set RAG_API_KEY in your HTTP client's environment. Never save a real key in this file.
 @apiKey = {{$processEnv RAG_API_KEY}}
 
+# Phase 4 examples below use the Northstar corpus imported by
+# samples/phase4/Import-SampleDocuments.ps1. See PHASE4.md.
+
 GET {{SemanticRagSearch.Api_HostAddress}}/
 Accept: application/json
 
@@ -9,6 +12,34 @@ Accept: application/json
 
 GET {{SemanticRagSearch.Api_HostAddress}}/health
 Accept: application/json
+
+### Hybrid search after importing the Northstar sample corpus
+
+POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/search
+X-API-Key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "tenantId": "00000000-0000-0000-0000-000000000001",
+  "query": "How is X-Northstar-Signature verified, and is its secret the same as a service-account key?",
+  "topK": 3,
+  "minSimilarity": 0.3,
+  "retrievalMode": "hybrid"
+}
+
+### Grounded answer using hybrid retrieval
+
+POST {{SemanticRagSearch.Api_HostAddress}}/api/v1/ask
+X-API-Key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "tenantId": "00000000-0000-0000-0000-000000000001",
+  "question": "Does increasing NS_WORKER_CONCURRENCY raise the workspace-wide processing allowance?",
+  "topK": 3,
+  "minSimilarity": 0.3,
+  "retrievalMode": "hybrid"
+}
 
 ###
 

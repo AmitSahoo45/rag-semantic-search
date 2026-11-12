@@ -95,7 +95,19 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
         Assert.NotEmpty(search.Matches);
         Assert.All(search.Matches, match => Assert.Equal(ingestion.DocumentId, match.DocumentId));
 
-        var request = new RagRequest(tenantId, question, 3, 0.1);
+        using HttpResponseMessage hybridResponse = await client.PostAsJsonAsync("/api/v1/search",
+            new SemanticSearchRequest(tenantId, "COBALT-7319", 3, 0.1, "hybrid"), token);
+        Assert.Equal(HttpStatusCode.OK, hybridResponse.StatusCode);
+        var hybrid = (await hybridResponse.Content.ReadFromJsonAsync<SemanticSearchResponse>(token))!;
+        Assert.Equal("hybrid", hybrid.RetrievalMode);
+        Assert.NotEmpty(hybrid.Matches);
+        Assert.All(hybrid.Matches, match =>
+        {
+            Assert.Equal(ingestion.DocumentId, match.DocumentId);
+            Assert.True(match.RankingScore > 0);
+        });
+
+        var request = new RagRequest(tenantId, question, 3, 0.1, "hybrid");
         using HttpResponseMessage answerResponse = await client.PostAsJsonAsync("/api/v1/ask", request, token);
         Assert.Equal(HttpStatusCode.OK, answerResponse.StatusCode);
         RagResponse answer = (await answerResponse.Content.ReadFromJsonAsync<RagResponse>(token))!;
@@ -104,6 +116,7 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
         Assert.All(answer.Sources, source => Assert.Equal(ingestion.DocumentId, source.DocumentId));
         Assert.Contains(answer.Sources, source => source.TextContent.Contains("COBALT-7319", StringComparison.Ordinal));
         Assert.NotNull(answer.Metadata);
+        Assert.Equal("hybrid", answer.Metadata.RetrievalMode);
 
         using var streamRequest = new HttpRequestMessage(HttpMethod.Post, "/api/v1/ask/stream")
         {
@@ -127,6 +140,7 @@ public sealed class LiveOllamaEndToEndTests(PostgresFixture database, ITestOutpu
         Assert.NotEmpty(completion.Sources!);
         Assert.All(completion.Sources!, source => Assert.Equal(ingestion.DocumentId, source.DocumentId));
         Assert.NotNull(completion.Metadata);
+        Assert.Equal("hybrid", completion.Metadata.RetrievalMode);
 
         using HttpResponseMessage unrelatedResponse = await client.PostAsJsonAsync("/api/v1/ask",
             request with { Question = "What is the orbital period of Neptune?", MinSimilarity = 0.99 }, token);

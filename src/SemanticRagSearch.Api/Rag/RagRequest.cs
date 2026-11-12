@@ -4,4 +4,5 @@ public sealed record RagRequest(
     Guid TenantId,
     string Question,
     int? TopK,
-    double? MinSimilarity) : Authentication.ITenantRequest;
+    double? MinSimilarity,
+    string? RetrievalMode = null) : Authentication.ITenantRequest;

@@ -49,6 +49,7 @@ builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
 builder.Services.AddScoped<IChunkingService, ChunkingService>();
 builder.Services.AddScoped<OllamaEmbeddingService>();
 builder.Services.AddScoped<IVectorStoreService, PgVectorStoreService>();
+builder.Services.AddScoped<IFullTextSearchService, PgFullTextSearchService>();
 builder.Services.AddScoped<IDocumentIngestionService, DocumentIngestionService>();
 builder.Services.AddScoped<SemanticSearchService>();
 builder.Services.AddScoped<OllamaTextGenerationService>();
@@ -57,7 +58,7 @@ builder.Services.AddScoped<IContextAssembler, ContextAssembler>();
 builder.Services.AddScoped<RagService>();
 builder.Services.AddRagObservability(builder.Configuration);
 
-builder.Services.AddHealthChecks().AddNpgSql(builder.Configuration.GetConnectionString("DefaultConnection")!);
+builder.Services.AddHealthChecks().AddNpgSql(sp => sp.GetRequiredService<IConfiguration>().GetConnectionString("DefaultConnection")!);
 builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"), npgsqlOptions => npgsqlOptions.UseVector()));
 
 var app = builder.Build();

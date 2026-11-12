@@ -32,6 +32,29 @@ public sealed class PostgresPersistenceApiTests(PostgresFixture postgres)
 
     [PostgresFact]
     [Trait("Category", "Postgres")]
+    public async Task HttpHybridSearch_ReturnsFusionScoresAndEnforcesThresholdAndTenant()
+    {
+        Tenant tenant = await AddTenantAsync("hybrid-http");
+        Tenant other = await AddTenantAsync("hybrid-other");
+        using var factory = new PostgresApiFactory(postgres.ConnectionString, new ControlledEmbeddingService());
+        using HttpClient client = factory.CreateClient();
+        DocumentIngestionResult relevant = await IngestAsync(client,
+            new(tenant.TenantId, "Authentication", null, "ALPHA refresh token expiration"));
+        await IngestAsync(client, new(tenant.TenantId, "Distant lexical", null, "BETA refresh token expiration"));
+        await IngestAsync(client, new(other.TenantId, "Other tenant", null, "ALPHA refresh token expiration"));
+
+        SemanticSearchResponse response = await SearchAsync(client,
+            new(tenant.TenantId, "refresh token", 2, 0.9, "hybrid"));
+
+        Assert.Equal("hybrid", response.RetrievalMode);
+        SemanticSearchMatch match = Assert.Single(response.Matches);
+        Assert.Equal(relevant.DocumentId, match.DocumentId);
+        Assert.InRange(match.Score, 0.999, 1.0);
+        Assert.Equal(2.0 / 61, match.RankingScore!.Value, 12);
+    }
+
+    [PostgresFact]
+    [Trait("Category", "Postgres")]
     public async Task HttpIngestion_PersistsVectorAndSearchableSource_AndDuplicateIsIdempotent()
     {
         Tenant tenant = await AddTenantAsync("http-roundtrip");

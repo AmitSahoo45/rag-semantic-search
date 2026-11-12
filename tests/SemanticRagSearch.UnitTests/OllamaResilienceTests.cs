@@ -150,6 +150,105 @@ public class OllamaResilienceTests
         Assert.Throws<Microsoft.Extensions.Options.OptionsValidationException>(resolveOptions);
     }
 
+    [Fact]
+    public void EqualAttemptAndTotalTimeouts_FailOptionsValidation()
+    {
+        var timeProvider = new ManualTimeProvider();
+        var handler = new ControlledHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
+        using ServiceProvider services = CreateServices(
+            timeProvider,
+            handler,
+            new Dictionary<string, string?>
+            {
+                [$"{OllamaResilienceOptions.SectionName}:AttemptTimeout"] = "00:00:10",
+                [$"{OllamaResilienceOptions.SectionName}:TotalRequestTimeout"] = "00:00:10"
+            });
+
+        Action resolveOptions = () =>
+            _ = services.GetRequiredService<
+                Microsoft.Extensions.Options.IOptions<OllamaResilienceOptions>>().Value;
+
+        Assert.Throws<Microsoft.Extensions.Options.OptionsValidationException>(resolveOptions);
+    }
+
+    [Theory]
+    [InlineData("AttemptTimeout", "00:00:00.009")]
+    [InlineData("AttemptTimeout", "1.00:00:00.001")]
+    [InlineData("TotalRequestTimeout", "00:00:00.009")]
+    [InlineData("TotalRequestTimeout", "1.00:00:00.001")]
+    [InlineData("CircuitBreakerSamplingDuration", "00:00:00.499")]
+    [InlineData("CircuitBreakerSamplingDuration", "1.00:00:00.001")]
+    [InlineData("CircuitBreakerBreakDuration", "00:00:00.499")]
+    [InlineData("CircuitBreakerBreakDuration", "1.00:00:00.001")]
+    public void DurationOutsidePollyRange_FailsOptionsValidation(string key, string value)
+    {
+        var timeProvider = new ManualTimeProvider();
+        var handler = new ControlledHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
+        using ServiceProvider services = CreateServices(
+            timeProvider,
+            handler,
+            new Dictionary<string, string?>
+            {
+                [$"{OllamaResilienceOptions.SectionName}:{key}"] = value
+            });
+
+        Action resolveOptions = () =>
+            _ = services.GetRequiredService<
+                Microsoft.Extensions.Options.IOptions<OllamaResilienceOptions>>().Value;
+
+        Assert.Throws<Microsoft.Extensions.Options.OptionsValidationException>(resolveOptions);
+    }
+
+    [Fact]
+    public void DurationsAtPollyRangeBoundaries_PassOptionsValidation()
+    {
+        var timeProvider = new ManualTimeProvider();
+        var handler = new ControlledHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
+        using ServiceProvider services = CreateServices(
+            timeProvider,
+            handler,
+            new Dictionary<string, string?>
+            {
+                [$"{OllamaResilienceOptions.SectionName}:AttemptTimeout"] = "00:00:00.010",
+                [$"{OllamaResilienceOptions.SectionName}:TotalRequestTimeout"] = "1.00:00:00",
+                [$"{OllamaResilienceOptions.SectionName}:CircuitBreakerSamplingDuration"] = "00:00:00.500",
+                [$"{OllamaResilienceOptions.SectionName}:CircuitBreakerBreakDuration"] = "1.00:00:00"
+            });
+
+        OllamaResilienceOptions options = services.GetRequiredService<
+            Microsoft.Extensions.Options.IOptions<OllamaResilienceOptions>>().Value;
+        HttpClient client = services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama");
+
+        Assert.Equal(TimeSpan.FromMilliseconds(10), options.AttemptTimeout);
+        Assert.Equal(TimeSpan.FromDays(1), options.TotalRequestTimeout);
+        Assert.NotNull(client);
+    }
+
+    [Fact]
+    public async Task CancellationNotRequestedByCaller_CountsAsFailureAndOpensCircuit()
+    {
+        var timeProvider = new ManualTimeProvider();
+        var handler = new ControlledHandler((_, _) =>
+            Task.FromException<HttpResponseMessage>(new OperationCanceledException()));
+        await using ServiceProvider services = CreateServices(
+            timeProvider,
+            handler,
+            CircuitTestConfiguration());
+        HttpClient client = services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.PostAsync("/api/embed", new StringContent("{}")));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.PostAsync("/api/embed", new StringContent("{}")));
+
+        await Assert.ThrowsAsync<BrokenCircuitException>(
+            () => client.PostAsync("/api/embed", new StringContent("{}")));
+        Assert.Equal(2, handler.RequestCount);
+    }
+
     private static Dictionary<string, string?> CircuitTestConfiguration()
     {
         return new Dictionary<string, string?>

@@ -1,0 +1,44 @@
+{
+  "name": "Northstar synthetic platform knowledge base v1",
+  "documents": [
+    { "id": "northstar-authentication", "title": "Northstar service authentication", "path": "documents/01-authentication.md" },
+    { "id": "northstar-workspace-access", "title": "Northstar workspace roles", "path": "documents/02-workspace-access.md" },
+    { "id": "northstar-api-limits", "title": "Northstar API request limits", "path": "documents/03-api-limits.md" },
+    { "id": "northstar-error-reference", "title": "Northstar failure diagnosis", "path": "documents/04-error-reference.md" },
+    { "id": "northstar-backup-policy", "title": "Northstar scheduled backups", "path": "documents/05-backup-policy.md" },
+    { "id": "northstar-workspace-restore", "title": "Northstar workspace restoration", "path": "documents/06-workspace-restore.md" },
+    { "id": "northstar-document-ingestion", "title": "Northstar document ingestion", "path": "documents/07-document-ingestion.md" },
+    { "id": "northstar-search-behavior", "title": "Northstar search behavior", "path": "documents/08-search-behavior.md" },
+    { "id": "northstar-background-jobs", "title": "Northstar background jobs", "path": "documents/09-background-jobs.md" },
+    { "id": "northstar-webhook-delivery", "title": "Northstar job webhooks", "path": "documents/10-webhook-delivery.md" },
+    { "id": "northstar-deployment-checks", "title": "Northstar deployment readiness", "path": "documents/11-deployment-checks.md" },
+    { "id": "northstar-audit-retention", "title": "Northstar audit records", "path": "documents/12-audit-retention.md" }
+  ],
+  "queries": [
+    { "id": "q01", "category": "paraphrase", "query": "How can a worker switch to a new credential without pausing its uploads?", "relevantDocumentIds": ["northstar-authentication"] },
+    { "id": "q02", "category": "paraphrase", "query": "My account can read documents but cannot add them, even though sign-in succeeds. Who can change its permissions?", "relevantDocumentIds": ["northstar-workspace-access"] },
+    { "id": "q03", "category": "paraphrase", "query": "If a newly submitted replacement cannot be indexed, what version will readers still see?", "relevantDocumentIds": ["northstar-document-ingestion", "northstar-search-behavior"] },
+    { "id": "q04", "category": "paraphrase", "query": "Why might a recovered workspace have its documents back while searches still return nothing?", "relevantDocumentIds": ["northstar-workspace-restore"] },
+    { "id": "q05", "category": "paraphrase", "query": "How should a notification receiver avoid processing the same completed task twice?", "relevantDocumentIds": ["northstar-webhook-delivery"] },
+    { "id": "q06", "category": "paraphrase", "query": "Can the API process look alive even when its storage or queue connection is broken?", "relevantDocumentIds": ["northstar-deployment-checks"] },
+    { "id": "q07", "category": "exact-identifier", "query": "What does NS-AUTH-101 mean, and will repeating the same secret fix it?", "relevantDocumentIds": ["northstar-authentication"] },
+    { "id": "q08", "category": "exact-identifier", "query": "What should a client do after NS-RATE-429, and how does Retry-After affect the next attempt?", "relevantDocumentIds": ["northstar-api-limits"] },
+    { "id": "q09", "category": "exact-identifier", "query": "An image-only PDF failed with NS-INDEX-207. What input change is needed?", "relevantDocumentIds": ["northstar-error-reference"] },
+    { "id": "q10", "category": "exact-identifier", "query": "What happens if Idempotency-Key is reused with identical content, and what if the content differs?", "relevantDocumentIds": ["northstar-document-ingestion"] },
+    { "id": "q11", "category": "exact-identifier", "query": "How is X-Northstar-Signature verified, and is its secret the same as a service-account key?", "relevantDocumentIds": ["northstar-webhook-delivery"] },
+    { "id": "q12", "category": "exact-identifier", "query": "Does increasing NS_WORKER_CONCURRENCY raise the workspace-wide processing allowance?", "relevantDocumentIds": ["northstar-deployment-checks"] },
+    { "id": "q13", "category": "terminology", "query": "Which items are excluded from scheduled workspace snapshots?", "relevantDocumentIds": ["northstar-backup-policy"] },
+    { "id": "q14", "category": "terminology", "query": "Does maxResults count distinct documents, and what is its maximum value?", "relevantDocumentIds": ["northstar-search-behavior"] },
+    { "id": "q15", "category": "terminology", "query": "Which job states are terminal, and does a Failed job restart automatically?", "relevantDocumentIds": ["northstar-background-jobs"] },
+    { "id": "q16", "category": "terminology", "query": "What format can Owners export audit records in, and can that export restore document content?", "relevantDocumentIds": ["northstar-audit-retention"] },
+    { "id": "q17", "category": "overlapping-topics", "query": "How do the workspace's API request budget and simultaneous background-job limit differ?", "relevantDocumentIds": ["northstar-api-limits", "northstar-background-jobs"] },
+    { "id": "q18", "category": "overlapping-topics", "query": "How long are workspace snapshots kept compared with audit events, and which one contains published document content?", "relevantDocumentIds": ["northstar-backup-policy", "northstar-audit-retention"] },
+    { "id": "q19", "category": "overlapping-topics", "query": "What is the difference between NS-AUTH-101 and NS-ACCESS-203 when a service account cannot upload?", "relevantDocumentIds": ["northstar-authentication", "northstar-workspace-access"] },
+    { "id": "q20", "category": "overlapping-topics", "query": "Which background-job endpoint can confirm the state reported by a webhook, and why should a consumer tolerate repeated notifications?", "relevantDocumentIds": ["northstar-background-jobs", "northstar-webhook-delivery"] }
+  ],
+  "unanswerableQueries": [
+    { "id": "u01", "query": "What is the monthly price of Northstar's Enterprise subscription?" },
+    { "id": "u02", "query": "Which cloud regions host Northstar workspace data?" },
+    { "id": "u03", "query": "What is Northstar's guaranteed uptime percentage and service-credit policy?" }
+  ]
+}

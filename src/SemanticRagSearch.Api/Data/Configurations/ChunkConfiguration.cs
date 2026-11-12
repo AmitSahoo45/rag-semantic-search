@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using NpgsqlTypes;
 using SemanticRagSearch.Api.Domain;
 
 namespace SemanticRagSearch.Api.Data.Configurations;
@@ -66,5 +67,15 @@ public class ChunkConfiguration : IEntityTypeConfiguration<Chunk>
             .IsUnique();
 
         builder.HasIndex(c => c.TenantId);
+
+        builder.HasIndex(c => c.Embedding)
+            .HasMethod("hnsw")
+            .HasOperators("vector_cosine_ops");
+
+        builder.Property<NpgsqlTsVector>("SearchVector")
+            .HasColumnName("search_vector")
+            .HasColumnType("tsvector")
+            .HasComputedColumnSql("to_tsvector('english'::regconfig, text_content)", stored: true);
+        builder.HasIndex("SearchVector").HasDatabaseName("IX_chunks_search_vector").HasMethod("gin");
     }
 }

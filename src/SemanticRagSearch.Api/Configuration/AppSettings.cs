@@ -28,6 +28,9 @@ public class SearchSettings
     public double MinSimilarity { get; set; } = 0.3;
     public int DefaultTopK { get; set; } = 5;
     public int MaxTopK { get; set; } = 20;
+    public string RetrievalMode { get; set; } = "vector";
+    public int CandidateLimit { get; set; } = 50;
+    public int RrfConstant { get; set; } = 60;
 }
 
 public class RagSettings

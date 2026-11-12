@@ -17,6 +17,11 @@ public class AppDbContext : DbContext
         modelBuilder.HasPostgresExtension("vector");
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
 
+        // The generated text index belongs to PostgreSQL. Keep provider-neutral
+        // service tests from needing to map Npgsql's shadow tsvector type.
+        if (!Database.IsNpgsql())
+            modelBuilder.Entity<Chunk>().Ignore("SearchVector");
+
         base.OnModelCreating(modelBuilder);
     }
 }

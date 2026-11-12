@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ApiExplorer;
+using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using SemanticRagSearch.Api.Controllers;
@@ -25,11 +27,17 @@ public class RagControllerTests
 
         HttpPostAttribute httpPost = Assert.Single(
             action.GetCustomAttributes<HttpPostAttribute>());
-        ProducesAttribute produces = Assert.Single(
-            action.GetCustomAttributes<ProducesAttribute>());
+        ProducesResponseTypeAttribute okResponse = Assert.Single(
+            action.GetCustomAttributes<ProducesResponseTypeAttribute>(),
+            attribute => attribute.StatusCode == StatusCodes.Status200OK);
+        var contentTypes = new MediaTypeCollection();
+        ((IApiResponseMetadataProvider)okResponse).SetContentTypes(contentTypes);
 
         Assert.Equal("stream", httpPost.Template);
-        Assert.Contains("text/event-stream", produces.ContentTypes);
+        Assert.Contains("text/event-stream", contentTypes);
+        // [Produces] is a result filter that breaks the automatic 400/415
+        // ProblemDetails responses, so the SSE content type must stay metadata-only.
+        Assert.Empty(action.GetCustomAttributes<ProducesAttribute>());
     }
 
     [Fact]
